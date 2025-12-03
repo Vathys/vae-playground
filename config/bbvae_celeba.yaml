@@ -1,0 +1,43 @@
+model_params:
+  name: "BetaVAE"
+  in_channels: 3
+  in_size: 64
+  latent_dim: 32
+  base_dim: 8
+  scale: 4
+  num_blocks: 1
+  residual: True
+  bottleneck: True
+  weight_norm: False
+  loss_type: "B"
+  beta: 10
+
+data_params:
+  dataset: "celeba"
+  data_path: "/mnt/ext-data-01/data"
+  train_batch_size: 64
+  val_batch_size: 64
+  patch_size: 64
+  num_workers: 4
+  pin_memory: True
+
+experiment_params:
+  optim1:
+    lr: 0.005
+    weight_decay: 0.0
+    warmup_epochs: 5
+    warmup_start_lr: 0.0001
+    eta_min: 0.0001
+  manual_seed: 1265
+  max_epochs: 100
+
+trainer_params:
+  devices: 1
+  strategy: "ddp"
+  precision: "32-true"
+  gradient_clip_val: 1
+  gradient_clip_algorithm: value
+
+logging_params:
+  save_dir: "logs/"
+  name: "BetaVAE"
