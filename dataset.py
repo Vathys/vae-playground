@@ -19,7 +19,10 @@ class CelebADataset(Dataset):
 
         with open(list_file, "r", encoding="utf-8") as f:
             self.dataset = [
-                (images_dir / file.strip().split(" ")[0], file.strip().split(" ")[1])
+                (
+                    images_dir / file.strip().split(" ")[0],
+                    int(file.strip().split(" ")[1]),
+                )
                 for file in f.readlines()
             ]
 
@@ -36,7 +39,7 @@ class CelebADataset(Dataset):
         img_path = self.dataset[index]
         image = Image.open(img_path)
 
-        return self.transform(image)
+        return {"input": self.transform(image)}
 
     def __len__(self):
         return self.num_images
@@ -60,7 +63,8 @@ class CelebAMaskHQDataset(Dataset):
     def __getitem__(self, index):
         img_path = self.dataset[index]
         image = Image.open(img_path)
-        return self.transform(image)
+
+        return {"input": self.transform(image)}
 
     def __len__(self):
         return self.num_images
@@ -113,17 +117,11 @@ class VAEDataset(L.LightningDataModule):
 
         if self.dataset == "celeba":
             self.train_dataset = CelebADataset(
-                self.data_dir,
-                split="train",
-                transform=T.Compose(raw_train),
-                download=False,
+                self.data_dir, split="train", transform=T.Compose(raw_train)
             )
 
             self.val_dataset = CelebADataset(
-                self.data_dir,
-                split="test",
-                transform=T.Compose(raw_val),
-                download=False,
+                self.data_dir, split="test", transform=T.Compose(raw_val)
             )
         elif self.dataset == "celebamask_hq":
             self.train_dataset = CelebAMaskHQDataset(

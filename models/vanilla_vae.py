@@ -1,5 +1,3 @@
-from typing import List
-
 import torch
 from torch import Tensor
 import torch.nn as nn
@@ -7,8 +5,6 @@ import torch.nn.functional as F
 
 from models.base import BaseVAE
 from models.blocks import ResidualConvBlock, ConvBlock, Block
-
-EPS = 1e-6
 
 
 class VanillaVAE(BaseVAE):
@@ -137,7 +133,8 @@ class VanillaVAE(BaseVAE):
 
         return nn.Sequential(core_block, out_block)
 
-    def encode(self, x: torch.Tensor):
+    def encode(self, data):
+        x = data["input"]
         x = self.encoder(x)
         [_, C, H, W] = list(x.size())
         assert C == self.feature_dim
@@ -149,35 +146,43 @@ class VanillaVAE(BaseVAE):
         mu = self.fc_mu(x)
         log_var = self.fc_var(x)
 
-        return [mu, log_var]
+        return {"mu": mu, "log_var": log_var}
 
-    def decode(self, z: torch.Tensor):
+    def decode(self, data):
+        z = data["z"]
         x = self.project(z)
         x = x.reshape(-1, self.feature_dim, self.feature_size, self.feature_size)
         x = self.decoder(x)
-        return x
+        return {"output": x}
 
     def reparametrize(self, mu: Tensor, log_var: Tensor) -> Tensor:
         std = torch.exp(0.5 * log_var)
         eps = torch.randn_like(std)
         return eps * std + mu
 
-    def forward(self, input: Tensor, **kwargs) -> List[Tensor]:
-        mu, log_var = self.encode(input)
-        z = self.reparametrize(mu, log_var)
-        return [self.decode(z), input, mu, log_var]
+    def forward(self, data):
+        encoded = self.encode(data)
+        z = self.reparametrize(encoded["mu"], encoded["log_var"])
+        decoded = self.decode({"z": z})
 
-    def loss_function(self, *args, **kwargs):
-        recons = args[0]
-        input = args[1]
-        mu = args[2]
-        log_var = args[3]
+        return {
+            "input": data["input"],
+            "output": decoded["output"],
+            "mu": encoded["mu"],
+            "log_var": encoded["log_var"],
+        }
+
+    def loss_function(self, data):
+        x = data["input"]
+        x_hat = data["output"]
+        mu = data["mu"]
+        log_var = data["log_var"]
 
         sigma = 1.0
 
         res_dict = {}
 
-        nll_loss = F.mse_loss(recons, input, reduction="none")
+        nll_loss = F.mse_loss(x_hat, x, reduction="none")
         nll_loss = nll_loss.view(nll_loss.size(0), -1).sum(dim=1) / (2.0 * sigma**2)
         res_dict["nll"] = nll_loss.mean().detach()
 
@@ -192,7 +197,33 @@ class VanillaVAE(BaseVAE):
 
         return res_dict
 
-    def sample_latent(self, batch_size):
-        return torch.randn(batch_size, self.latent_dim).to(
-            next(self.parameters()).device
-        )
+    def sample_test(self, num: int, inter: int = 5, batch_size: int = 1):
+        device = next(self.parameters()).device
+        anchors = torch.randn(num * 2, self.latent_dim, device=device)
+
+        pairs = anchors.view(num, 2, self.latent_dim)
+
+        all_interps = []
+
+        t_vals = torch.linspace(0, 1, inter, device=device)
+
+        for i in range(num):
+            z1, z2 = pairs[i]
+
+            interped = (1 - t_vals[:, None]) * z1[None, :] + t_vals[:, None] * z2[
+                None, :
+            ]
+
+            all_interps.append(interped)
+
+        all_interps = torch.cat(all_interps, dim=0)
+
+        total = all_interps.size(0)
+        if total % batch_size != 0:
+            raise ValueError(
+                f"Cannot divide {total} vectors evenly into batch_size={batch_size}"
+            )
+
+        batched = all_interps.view(total // batch_size, batch_size, self.latent_dim)
+
+        return [{"z": batched[i]} for i in range(batched.size(0))]

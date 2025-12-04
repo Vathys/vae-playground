@@ -1,5 +1,5 @@
 from models.base import *
-from models.vanilla import *
+from models.vanilla_vae import *
 from models.beta_vae import *
 from models.flow_vae import *
 

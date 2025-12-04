@@ -7,60 +7,49 @@ import torchvision.utils as vutils
 from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 
 
-class VAExperiment(L.LightningModule):
+class VAEExperiment(L.LightningModule):
 
     def __init__(self, vae_model: BaseVAE, params: dict) -> None:
         super().__init__()
 
         self.model = vae_model
         self.params = params
-        self.curr_device = None
 
         self.test_input = None
         self.test_latents = None
 
-    def forward(self, input: Tensor, **kwargs) -> Tensor:
-        return self.model(input, **kwargs)
+    def forward(self, data) -> Tensor:
+        return self.model(data)
 
     def training_step(self, batch, batch_idx):
-        real_img = batch
-        self.curr_device = real_img.device
-
-        results = self.forward(real_img)
-        train_loss = self.model.loss_function(
-            *results,
-            batch_idx=batch_idx,
-            global_step=self.global_step,
-        )
+        results = self.forward(batch)
+        results["global_step"] = self.global_step
+        train_loss = self.model.loss_function(results)
 
         self.log_dict(
             {f"train/{key}": val.item() for key, val in train_loss.items()},
             sync_dist=True,
         )
 
-        return train_loss["loss"]
+        return train_loss
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
         if batch_idx == 0:
             self.log_grads()
 
     def validation_step(self, batch, batch_idx):
-        real_img = batch
-        self.curr_device = real_img.device
-
         if self.test_input is None or self.test_latents is None:
             self.initialize_image_inputs(batch)
 
-        results = self.forward(real_img)
-        val_loss = self.model.loss_function(
-            *results,
-            batch_idx=batch_idx,
-            global_step=self.global_step,
-        )
+        results = self.forward(batch)
+        results["global_step"] = self.global_step
+        val_loss = self.model.loss_function(results)
 
         self.log_dict(
             {f"val/{key}": val.item() for key, val in val_loss.items()}, sync_dist=True
         )
+
+        return val_loss
 
     def on_validation_end(self) -> None:
         self.sample_images()
@@ -82,21 +71,25 @@ class VAExperiment(L.LightningModule):
 
     def initialize_image_inputs(self, batch):
         if self.test_input is None:
-            self.test_input = batch[:25].to(self.curr_device)
+            self.test_input = {"input": batch["input"][:25]}
 
         if self.test_latents is None:
-            z = self.model.sample_latent(25)
+            z = self.model.sample_test(5, 5, 25)
 
             self.test_latents = z
 
     def sample_images(self):
-        recons = self.model.forward(self.test_input)[0]
-        grid = vutils.make_grid(recons.data, nrow=5)
+        output = self.model.forward(self.test_input)["output"]
+        grid = vutils.make_grid(output, nrow=5)
         self.logger.experiment.add_image("reconstruction", grid, self.global_step)
 
         try:
-            samples = self.model.decode(self.test_latents)
-            grid = vutils.make_grid(samples.data, nrow=5)
+            result = []
+            for latent in self.test_latents:
+                result.append(self.model.decode(latent)["output"])
+            result = torch.cat(result, dim=0)
+
+            grid = vutils.make_grid(result, nrow=5)
             self.logger.experiment.add_image("samples", grid, self.global_step)
         except Warning:
             pass

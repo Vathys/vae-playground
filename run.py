@@ -2,7 +2,7 @@ import os
 import yaml
 import argparse
 from models import *
-from experiment import VAExperiment
+from experiment import VAEExperiment
 from lightning.pytorch import Trainer, seed_everything
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
@@ -40,7 +40,7 @@ torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
 model = vae_models[config["model_params"]["name"]](**config["model_params"])
-experiment = VAExperiment(model, config["experiment_params"])
+experiment = VAEExperiment(model, config["experiment_params"])
 
 data = VAEDataset(**config["data_params"])
 data.setup()
