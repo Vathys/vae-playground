@@ -5,6 +5,7 @@ import torch.nn.functional as F
 
 from models.base import BaseVAE
 from models.blocks import Block, ConvBlock, ResidualConvBlock
+from utils import lerp_z
 
 
 class PlanarFlow(nn.Module):
@@ -360,9 +361,7 @@ class FlowVAE(BaseVAE):
         for i in range(num):
             z1, z2 = pairs[i]
 
-            interped = (1 - t_vals[:, None]) * z1[None, :] + t_vals[:, None] * z2[
-                None, :
-            ]
+            interped = lerp_z(z1, z2, t_vals)
 
             all_interps.append(interped)
 

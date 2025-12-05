@@ -5,6 +5,7 @@ import torch.nn.functional as F
 
 from models.base import BaseVAE
 from models.blocks import ResidualConvBlock, ConvBlock, Block
+from utils import lerp_z
 
 
 class BetaVAE(BaseVAE):
@@ -24,7 +25,7 @@ class BetaVAE(BaseVAE):
         self.beta = kwargs["beta"] if "beta" in kwargs else None
         self.gamma = kwargs["gamma"] if "gamma" in kwargs else None
         self.C_max = kwargs["max_capacity"] if "max_capacity" in kwargs else None
-        self.C_stop_iter = kwargs["C_stop_iter"] if "C_stop_iter" in kwargs else None
+        self.C_stop_iter = kwargs["C_stop_iter"] if "C_stop_iter" in kwargs else 100000
 
         assert (self.beta is not None) or (
             self.gamma is not None and self.C_max is not None
@@ -203,7 +204,6 @@ class BetaVAE(BaseVAE):
 
         if self.loss_type == "B":
             loss = nll_loss + self.beta * kld_loss
-            loss = loss.mean()
         elif self.loss_type == "H":
             C = torch.clamp(
                 torch.tensor([self.C_max], device=next(self.parameters()).device)
@@ -215,8 +215,8 @@ class BetaVAE(BaseVAE):
             res_dict["C"] = C.detach()
             cap_kld_loss = (kld_loss - C).abs()
             loss = nll_loss + self.gamma * cap_kld_loss
-            loss = loss.mean()
 
+        loss = loss.mean()
         res_dict["loss"] = loss
 
         res_dict["elbo"] = -(nll_loss + kld_loss).mean().detach()
@@ -236,9 +236,7 @@ class BetaVAE(BaseVAE):
         for i in range(num):
             z1, z2 = pairs[i]
 
-            interped = (1 - t_vals[:, None]) * z1[None, :] + t_vals[:, None] * z2[
-                None, :
-            ]
+            interped = lerp_z(z1, z2, t_vals)
 
             all_interps.append(interped)
 

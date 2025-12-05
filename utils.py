@@ -2,9 +2,7 @@ import torch
 
 import logging
 import time
-from typing import Any
 
-import lightning as L
 from lightning.pytorch import Callback
 from lightning.pytorch.utilities import rank_zero_only
 from lightning.pytorch.utilities.types import STEP_OUTPUT
@@ -118,3 +116,45 @@ def create_channel_mask(c_in, invert=False):
     if invert:
         mask = 1 - mask
     return mask
+
+
+def lerp_z(z1: torch.Tensor, z2: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    """
+    Calculate the lerp between two tensors z1, z2 with time values t.
+
+    :param z1: tensor of size n
+    :type z1: torch.Tensor
+    :param z2: tensor of size n
+    :type z2: torch.Tensor
+    :param t: tensor of size t
+    :type t: torch.Tensor
+    :return: tensor of size [t, n]
+    :rtype: torch.Tensor
+    """
+    return (1 - t[:, None]) * z1[None, :] + t[:, None] * z2[None, :]
+
+
+def slerp_z(z1: torch.Tensor, z2: torch.Tensor, t: torch.Tensor):
+    """
+    Calculate the spherical lerp between two tensors z1, z2 with time values t.
+
+    :param z1: tensor of size n
+    :type z1: torch.Tensor
+    :param z2: tensor of size n
+    :type z2: torch.Tensor
+    :param t: tensor of size t
+    :type t: torch.Tensor
+    :return: tensor of size [t, n]
+    :rtype: torch.Tensor
+    """
+    z1 = z1 / z1.norm()
+    z2 = z2 / z2.norm()
+
+    dot = (z1 * z2).sum().clamp(-1, 1)
+    theta = torch.acos(dot)
+    sin_theta = torch.sin(theta)
+
+    t1 = (torch.sin((1 - t[:, None]) * theta) / sin_theta) * z1[None, :]
+    t2 = (torch.sin(t[:, None] * theta) / sin_theta) * z2[None, :]
+
+    return t1 + t2

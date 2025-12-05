@@ -52,7 +52,7 @@ runner = Trainer(
         ModelCheckpoint(
             save_top_k=2,
             dirpath=os.path.join(tb_logger.log_dir, "checkpoints"),
-            monitor="val/elbo",
+            monitor="val/loss",
             save_last=True,
             mode="max",
         ),

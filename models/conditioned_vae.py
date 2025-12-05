@@ -1,14 +1,17 @@
+import math
 import torch
 from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision import transforms as T
 
 from models.base import BaseVAE
 from models.blocks import ResidualConvBlock, ConvBlock, Block
-from utils import lerp_z
+from external.magface import load_magface
+from utils import lerp_z, slerp_z
 
 
-class VanillaVAE(BaseVAE):
+class ConditionedVAE(BaseVAE):
     def __init__(self, **kwargs):
         super().__init__()
         self.in_channels = kwargs["in_channels"]
@@ -16,10 +19,27 @@ class VanillaVAE(BaseVAE):
         self.latent_dim = kwargs["latent_dim"]
         self.base_dim = kwargs["base_dim"]
         self.scale = kwargs["scale"]
-        self.num_blocks = kwargs["num_blocks"]
-        self.residual = kwargs["residual"]
-        self.bottleneck = kwargs["bottleneck"]
-        self.weight_norm = kwargs["weight_norm"]
+        self.num_blocks = kwargs.get("num_blocks", 1)
+        self.residual = kwargs.get("residual", False)
+        self.bottleneck = kwargs.get("bottleneck", True)
+        self.weight_norm = kwargs.get("weight_norm", False)
+
+        self.loss_type = kwargs.get("loss_type", None)
+        self.beta = kwargs["beta"] if "beta" in kwargs else None
+        self.gamma = kwargs["gamma"] if "gamma" in kwargs else None
+        self.C_max = kwargs["max_capacity"] if "max_capacity" in kwargs else None
+        self.C_stop_iter = kwargs["C_stop_iter"] if "C_stop_iter" in kwargs else None
+
+        identity_model_path = kwargs["identity_model_path"]
+        self.identity_model = load_magface(identity_model_path).requires_grad_(False)
+        self.identity_model.eval()
+
+        self.id_preprocess = T.Resize((112, 112))
+        self.identity_model = self.identity_model
+        self.id_dim = 512
+
+        self.id_weight = nn.Linear(self.id_dim, self.latent_dim)
+        self.id_bias = nn.Linear(self.id_dim, self.latent_dim)
 
         self.encoder, self.feature_dim = self._build_encoder()
         self.feature_size = self.in_size // 2**self.scale
@@ -133,8 +153,17 @@ class VanillaVAE(BaseVAE):
 
         return nn.Sequential(core_block, out_block)
 
+    def _extract_identity(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.id_preprocess(x)
+
+        feat = self.identity_model(x)
+        feat = feat / feat.norm(dim=1, keepdim=True)
+
+        return feat
+
     def encode(self, data):
         x = data["input"]
+
         x = self.encoder(x)
         [_, C, H, W] = list(x.size())
         assert C == self.feature_dim
@@ -150,6 +179,18 @@ class VanillaVAE(BaseVAE):
 
     def decode(self, data):
         z = data["z"]
+        feat = data["feat"]
+
+        id_weight = self.id_weight(feat)
+        id_bias = self.id_bias(feat)
+
+        z_mean = z.mean(dim=1, keepdim=True)
+        z_std = z.std(dim=1, keepdim=True)
+
+        z = id_weight * z + id_bias
+        z = (z - z.mean(dim=1, keepdim=True)) / (z.std(dim=1, keepdim=True) + 1e-6)
+        z = z * z_std + z_mean
+
         x = self.project(z)
         x = x.reshape(-1, self.feature_dim, self.feature_size, self.feature_size)
         x = self.decoder(x)
@@ -161,13 +202,19 @@ class VanillaVAE(BaseVAE):
         return eps * std + mu
 
     def forward(self, data):
-        encoded = self.encode(data)
+        x = data["input"]
+        feat = self._extract_identity(x)
+
+        encoded = self.encode({**data, "feat": feat})
+
         z = self.reparametrize(encoded["mu"], encoded["log_var"])
-        decoded = self.decode({"z": z})
+
+        decoded = self.decode({"z": z, "feat": feat})
 
         return {
             "input": data["input"],
             "output": decoded["output"],
+            "feat": feat,
             "mu": encoded["mu"],
             "log_var": encoded["log_var"],
         }
@@ -177,6 +224,8 @@ class VanillaVAE(BaseVAE):
         x_hat = data["output"]
         mu = data["mu"]
         log_var = data["log_var"]
+
+        num_iters = data["global_step"]
 
         sigma = 1.0
 
@@ -189,39 +238,104 @@ class VanillaVAE(BaseVAE):
         kld_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1.0 - log_var, dim=1)
         res_dict["kld"] = kld_loss.mean().detach()
 
-        loss = nll_loss + kld_loss
+        if self.loss_type == "B" and self.beta is not None:
+            loss = nll_loss + self.beta * kld_loss
+        elif (
+            self.loss_type == "H" and self.gamma is not None and self.C_max is not None
+        ):
+            C = torch.clamp(
+                torch.tensor([self.C_max], device=next(self.parameters()).device)
+                / self.C_stop_iter
+                * num_iters,
+                0,
+                self.C_max,
+            )
+            res_dict["C"] = C.detach()
+            cap_kld_loss = (kld_loss - C).abs()
+            loss = nll_loss + self.gamma * cap_kld_loss
+        else:
+            loss = nll_loss + kld_loss
+
         loss = loss.mean()
         res_dict["loss"] = loss
 
-        res_dict["elbo"] = -loss.detach()
+        res_dict["elbo"] = -(nll_loss + kld_loss).mean().detach()
 
         return res_dict
 
     def sample_test(self, num: int, inter: int = 5, batch_size: int = 1):
         device = next(self.parameters()).device
-        anchors = torch.randn(num * 2, self.latent_dim, device=device)
 
-        pairs = anchors.view(num, 2, self.latent_dim)
+        p_num = num // 2
 
-        all_interps = []
+        z_anchors = torch.randn(p_num * 2, self.latent_dim, device=device)
+        f_rad = 1 + 0.05 * torch.randn(p_num * 2, 1, device=device)
+        f_anchors = torch.randn(p_num * 2, self.id_dim, device=device)
+        f_anchors = f_rad * f_anchors / f_anchors.norm(dim=1, keepdim=True)
+
+        z_pairs = z_anchors.view(p_num, 2, self.latent_dim)
+        f_pairs = f_anchors.view(p_num, 2, self.id_dim)
+
+        all_z = []
+        all_f = []
 
         t_vals = torch.linspace(0, 1, inter, device=device)
 
-        for i in range(num):
-            z1, z2 = pairs[i]
+        for i in range(p_num):
+            z1 = z_pairs[i, 0]
+            z2 = z_pairs[i, 1]
+            f1 = f_pairs[i, 0]
+            f2 = f_pairs[i, 1]
 
-            interped = lerp_z(z1, z2, t_vals)
+            z_interp = lerp_z(z1, z2, t_vals)
+            f_fixed = f1.expand(inter, self.id_dim)
 
-            all_interps.append(interped)
+            all_z.append(z_interp)
+            all_f.append(f_fixed)
 
-        all_interps = torch.cat(all_interps, dim=0)
+            mag_f1 = f1.norm(keepdim=True)
+            dir_f1 = f1 / mag_f1
+            mag_f2 = f2.norm(keepdim=True)
+            dir_f2 = f2 / mag_f2
 
-        total = all_interps.size(0)
+            dir_interp = slerp_z(dir_f1, dir_f2, t_vals)
+            mag_interp = lerp_z(mag_f1, mag_f2, t_vals)
+
+            f_interp = dir_interp * mag_interp
+            z_fixed = z1.expand(inter, self.latent_dim)
+
+            all_z.append(z_fixed)
+            all_f.append(f_interp)
+
+        if num % 2 == 1:
+            extra_z_anchors = torch.randn(2, self.latent_dim, device=device)
+            extra_f_rad = 1 + 0.05 * torch.randn(1, 1, device=device)
+            extra_f_anchor = torch.randn(1, self.id_dim, device=device)
+            extra_f_anchor = (
+                extra_f_rad * extra_f_anchor / extra_f_anchor.norm(dim=1, keepdim=True)
+            )
+
+            z1 = extra_z_anchors[0]
+            z2 = extra_z_anchors[1]
+
+            z_interp = lerp_z(z1, z2, t_vals)
+            f_fixed = extra_f_anchor.expand(inter, self.id_dim)
+
+            all_z.append(z_interp)
+            all_f.append(f_fixed)
+
+        all_z = torch.cat(all_z, dim=0)
+        all_f = torch.cat(all_f, dim=0)
+
+        total = all_z.size(0)
         if total % batch_size != 0:
             raise ValueError(
                 f"Cannot divide {total} vectors evenly into batch_size={batch_size}"
             )
 
-        batched = all_interps.view(total // batch_size, batch_size, self.latent_dim)
+        batched_z = all_z.view(total // batch_size, batch_size, self.latent_dim)
+        batched_f = all_f.view(total // batch_size, batch_size, self.id_dim)
 
-        return [{"z": batched[i]} for i in range(batched.size(0))]
+        return [
+            {"z": batched_z[i], "feat": batched_f[i]} for i in range(batched_z.size(0))
+        ]
