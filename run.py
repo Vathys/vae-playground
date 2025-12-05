@@ -50,11 +50,11 @@ runner = Trainer(
     callbacks=[
         LearningRateMonitor(),
         ModelCheckpoint(
-            save_top_k=2,
+            save_top_k=5,
             dirpath=os.path.join(tb_logger.log_dir, "checkpoints"),
             monitor="val/loss",
             save_last=True,
-            mode="max",
+            mode="min",
         ),
         LogPerformanceCallback(),
     ],
