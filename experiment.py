@@ -1,7 +1,7 @@
 import torch
 from torch import Tensor
 from torch import optim
-from models import BaseVAE
+from models import vae_models
 import lightning as L
 import torchvision.utils as vutils
 from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
@@ -9,14 +9,16 @@ from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 
 class VAEExperiment(L.LightningModule):
 
-    def __init__(self, vae_model: BaseVAE, params: dict) -> None:
+    def __init__(self, model_params, experiment_params) -> None:
         super().__init__()
 
-        self.model = vae_model
-        self.params = params
+        self.model = vae_models[model_params["name"]](**model_params)
+        self.params = experiment_params
 
         self.test_input = None
         self.test_latents = None
+
+        self.save_hyperparameters()
 
     def forward(self, data) -> Tensor:
         return self.model(data)

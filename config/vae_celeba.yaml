@@ -1,14 +1,30 @@
 model_params:
   name: "VanillaVAE"
-  in_channels: 3
-  in_size: 64
   latent_dim: 32
-  base_dim: 8
-  scale: 4
-  num_blocks: 1
-  residual: True
-  bottleneck: True
-  weight_norm: False
+  encoder:
+    in_channels: 3
+    in_size: 64
+    base_dim: 8
+    scales: 4
+    num_blocks: 1
+    channel_multiplier: 2
+    min_spatial: 4
+    residual: True
+    bottleneck: True
+    weight_norm: False
+    norm: "layer"
+    activation: "silu"
+  decoder:
+    out_channels: 3
+    scales: 4
+    num_blocks: 1
+    channel_multiplier: 0.5
+    residual: True
+    bottleneck: True
+    weight_norm: False
+    norm: "layer"
+    activation: "silu"
+    final_activation: "sigmoid"
 
 data_params:
   dataset: "celeba"

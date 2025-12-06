@@ -6,7 +6,7 @@ from abc import abstractmethod
 class BaseVAE(nn.Module):
 
     def __init__(self) -> None:
-        super(BaseVAE, self).__init__()
+        super().__init__()
 
     def encode(self, data: dict) -> dict:
         raise NotImplementedError

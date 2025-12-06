@@ -1,3 +1,4 @@
+from typing import Tuple
 import torch.nn as nn
 
 
@@ -77,25 +78,25 @@ class WeightNormConv2d(nn.Module):
 
 
 class Block(nn.Module):
-
     ACTIVATIONS = {
-        "None": lambda dim: Identity(),
-        "ReLU": lambda dim: nn.ReLU(),
-        "PReLU": lambda dim: nn.PReLU(dim),
-        "PReLU1": lambda dim: nn.PReLU(1),
-        "LeakyReLU": lambda dim: nn.LeakyReLU(),
-        "SELU": lambda dim: nn.SELU(),
-        "CELU": lambda dim: nn.CELU(),
-        "GELU": lambda dim: nn.GELU(),
-        "SiLU": lambda dim: nn.SiLU(),
-        "Sigmoid": lambda dim: nn.Sigmoid(),
+        "none": lambda dim: Identity(),
+        "relu": lambda dim: nn.ReLU(),
+        "prelu": lambda dim: nn.PReLU(dim),
+        "prelu1": lambda dim: nn.PReLU(1),
+        "leaky_relu": lambda dim: nn.LeakyReLU(),
+        "selu": lambda dim: nn.SELU(),
+        "celu": lambda dim: nn.CELU(),
+        "gelu": lambda dim: nn.GELU(),
+        "silu": lambda dim: nn.SiLU(),
+        "sigmoid": lambda dim: nn.Sigmoid(),
+        "tanh": lambda dim: nn.Tanh(),
     }
 
     NORMS = {
-        "None": lambda dim: Identity(),
-        "BatchNorm": lambda dim: nn.BatchNorm2d(dim),
-        "LayerNorm": lambda dim: nn.GroupNorm(1, dim),
-        "InstanceNorm": lambda dim: nn.GroupNorm(dim, dim),
+        "none": lambda dim: Identity(),
+        "batch": lambda dim: nn.BatchNorm2d(dim),
+        "layer": lambda dim: nn.GroupNorm(1, dim),
+        "instance": lambda dim: nn.GroupNorm(dim, dim),
     }
 
     def __init__(
@@ -110,8 +111,8 @@ class Block(nn.Module):
         weight_norm=True,
         scale=False,
         transpose=False,
-        norm="BatchNorm",
-        activation="LeakyReLU",
+        norm="batch",
+        activation="leaky_relu",
     ):
         super().__init__()
 
@@ -152,8 +153,8 @@ class ConvBlock(nn.Module):
         bottleneck,
         weight_norm,
         transpose=False,
-        norm="BatchNorm",
-        activation="ReLU",
+        norm="batch",
+        activation="leaky_relu",
     ):
         """Initializes a Standard Block.
 
@@ -256,3 +257,169 @@ class ResidualConvBlock(ConvBlock):
             transformed tensor.
         """
         return x + self.block(x)
+
+
+def build_encoder(cfg: dict) -> Tuple[nn.Module, int, int]:
+    """Builds an encoder that successively scales down via convolutions.
+
+    :param cfg: Encoder config
+
+    Config includes:
+        - in_channels: number of input channels
+        - in_size: size of (square) input image
+        - base_dim: starting dimension for scaling
+        - scales: number of times to scale the image
+        - num_blocks: number of convolution blocks per scale
+        - residual: boolean indicating whether to make blocks residual.
+        - channel_multiplier: multiplier to increase channels per scale.
+        - min_spatial: minimum size when scaling; images won't be scaled above this size.
+        - bottleneck: whether scale block should include a bottleneck
+        - weight_norm: whether to normalize weights
+        - norm: normalization block to use
+        - activation: activation to use
+
+    :type cfg: dict
+    :return: Tuple with encoder, out dimension and output size
+    :rtype: Tuple[Module, int, int]
+    """
+    BlockType = ResidualConvBlock if cfg["residual"] else ConvBlock
+
+    in_block = Block(
+        cfg["in_channels"],
+        cfg["base_dim"],
+        (3, 3),
+        stride=1,
+        padding=1,
+        bias=True,
+        weight_norm=cfg["weight_norm"],
+        scale=True,
+        norm=cfg["norm"],
+        activation=cfg["activation"],
+    )
+
+    core = nn.Sequential()
+    dim = cfg["base_dim"]
+    spatial = cfg["in_size"]
+
+    for i in range(cfg["scales"]):
+        for j in range(cfg["num_blocks"]):
+            core.add_module(
+                f"scale_{i}_block_{j}",
+                BlockType(
+                    dim,
+                    bottleneck=cfg["bottleneck"],
+                    weight_norm=cfg["weight_norm"],
+                    norm=cfg["norm"],
+                    activation=cfg["activation"],
+                ),
+            )
+
+        if spatial > cfg["min_spatial"]:
+            out_dim = int(dim * cfg["channel_multiplier"])
+            core.add_module(
+                f"scale_{i}_down",
+                Block(
+                    dim,
+                    out_dim,
+                    (3, 3),
+                    stride=2,
+                    padding=1,
+                    bias=True,
+                    weight_norm=cfg["weight_norm"],
+                    scale=True,
+                    norm=cfg["norm"],
+                    activation=cfg["activation"],
+                ),
+            )
+            spatial //= 2
+            dim = out_dim
+        else:
+            print(f"Skipping scale {i}. Cannot scale beyond {cfg['min_spatial']}.")
+
+    encoder = nn.Sequential(in_block, core)
+    return encoder, dim, spatial
+
+
+def build_decoder(cfg: dict) -> nn.Module:
+    """Builds a decoder that successively scales up via convolutions.
+
+    :param cfg: Decoder config:
+
+    Config includes:
+        - in_channels: number of input channels
+        - in_size: size of (square) input image
+        - out_channels: number of output channels
+        - scales: number of times to scale the image
+        - num_blocks: number of convolution blocks per scale
+        - residual: boolean indicating whether to make blocks residual.
+        - channel_multiplier: multiplier to increase channels per scale.
+        - bottleneck: whether scale block should include a bottleneck
+        - weight_norm: whether to normalize weights
+        - norm: normalization block to use
+        - activation: activation to use
+        - final_activation: activation to use in the final convolution.
+
+    :type cfg: dict
+    :param start_dim: Description
+    :type start_dim: int
+    :param start_hw: Description
+    :type start_hw: int
+    :return: Description
+    :rtype: Module
+    """
+    BlockType = ResidualConvBlock if cfg["residual"] else ConvBlock
+
+    dim = cfg["in_channels"]
+    spatial = cfg["in_size"]
+
+    core = nn.Sequential()
+
+    for i in reversed(range(cfg["scales"])):
+        for j in range(cfg["num_blocks"]):
+            core.add_module(
+                f"scale_{i}_block_{j}",
+                BlockType(
+                    dim,
+                    bottleneck=cfg["bottleneck"],
+                    weight_norm=cfg["weight_norm"],
+                    transpose=True,
+                    norm=cfg["norm"],
+                    activation=cfg["activation"],
+                ),
+            )
+
+        out_dim = int(dim * cfg["channel_multiplier"])
+        core.add_module(
+            f"scale_{i}_up",
+            Block(
+                dim,
+                out_dim,
+                (3, 3),
+                stride=2,
+                padding=1,
+                output_padding=1,
+                bias=True,
+                weight_norm=cfg["weight_norm"],
+                scale=True,
+                transpose=True,
+                norm=cfg["norm"],
+                activation=cfg["activation"],
+            ),
+        )
+        dim = out_dim
+        spatial *= 2
+
+    out_block = Block(
+        dim,
+        cfg["out_channels"],
+        (3, 3),
+        stride=1,
+        padding=1,
+        bias=True,
+        weight_norm=cfg["weight_norm"],
+        scale=True,
+        norm="none",
+        activation=cfg["final_activation"],
+    )
+
+    return nn.Sequential(core, out_block)

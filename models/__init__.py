@@ -10,3 +10,5 @@ vae_models = {
     "FlowVAE": FlowVAE,
     "ConditionedVAE": ConditionedVAE,
 }
+
+__all__ = vae_models

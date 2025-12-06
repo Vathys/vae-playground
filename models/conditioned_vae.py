@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torchvision import transforms as T
 
 from models.base import BaseVAE
-from models.blocks import ResidualConvBlock, ConvBlock, Block
+from models.blocks import build_decoder, build_encoder
 from external.magface import load_magface
 from utils import lerp_z, slerp_z
 
@@ -14,16 +14,7 @@ from utils import lerp_z, slerp_z
 class ConditionedVAE(BaseVAE):
     def __init__(self, **kwargs):
         super().__init__()
-        self.in_channels = kwargs["in_channels"]
-        self.in_size = kwargs["in_size"]
         self.latent_dim = kwargs["latent_dim"]
-        self.base_dim = kwargs["base_dim"]
-        self.scale = kwargs["scale"]
-        self.num_blocks = kwargs.get("num_blocks", 1)
-        self.residual = kwargs.get("residual", False)
-        self.bottleneck = kwargs.get("bottleneck", True)
-        self.weight_norm = kwargs.get("weight_norm", False)
-
         self.loss_type = kwargs.get("loss_type", None)
         self.beta = kwargs["beta"] if "beta" in kwargs else None
         self.gamma = kwargs["gamma"] if "gamma" in kwargs else None
@@ -41,117 +32,21 @@ class ConditionedVAE(BaseVAE):
         self.id_weight = nn.Linear(self.id_dim, self.latent_dim)
         self.id_bias = nn.Linear(self.id_dim, self.latent_dim)
 
-        self.encoder, self.feature_dim = self._build_encoder()
-        self.feature_size = self.in_size // 2**self.scale
-        flat_dim = self.feature_dim * self.feature_size**2
+        enc_cfg = kwargs["encoder"]
+        dec_cfg = kwargs["decoder"]
+
+        self.encoder, self.enc_out_dim, self.enc_out_hw = build_encoder(enc_cfg)
+
+        flat_dim = self.enc_out_dim * (self.enc_out_hw**2)
 
         self.fc_mu = nn.Linear(flat_dim, self.latent_dim)
         self.fc_var = nn.Linear(flat_dim, self.latent_dim)
-
         self.project = nn.Linear(self.latent_dim, flat_dim)
 
-        self.decoder = self._build_decoder(self.feature_dim)
+        dec_cfg["in_channels"] = self.enc_out_dim
+        dec_cfg["in_size"] = self.enc_out_hw
 
-    def _build_encoder(self):
-        BlockType = ResidualConvBlock if self.residual else ConvBlock
-
-        in_block = Block(
-            self.in_channels,
-            self.base_dim,
-            (3, 3),
-            stride=1,
-            padding=1,
-            bias=True,
-            weight_norm=self.weight_norm,
-            scale=True,
-            norm="LayerNorm",
-            activation="SiLU",
-        )
-
-        core_block = nn.Sequential()
-        dim = self.base_dim
-        for i in range(self.scale):
-            for j in range(self.num_blocks):
-                core_block.add_module(
-                    f"scale_{i}_res_{j}",
-                    BlockType(
-                        dim,
-                        bottleneck=self.bottleneck,
-                        weight_norm=self.weight_norm,
-                        norm="LayerNorm",
-                        activation="SiLU",
-                    ),
-                )
-            core_block.add_module(
-                f"scale_{i}_out",
-                Block(
-                    dim,
-                    dim * 2,
-                    (3, 3),
-                    stride=2,
-                    padding=1,
-                    bias=True,
-                    weight_norm=self.weight_norm,
-                    scale=True,
-                    norm="LayerNorm",
-                    activation="SiLU",
-                ),
-            )
-            dim *= 2
-
-        return nn.Sequential(in_block, core_block), dim
-
-    def _build_decoder(self, dim):
-        BlockType = ResidualConvBlock if self.residual else ConvBlock
-
-        core_block = nn.Sequential()
-        for i in reversed(range(self.scale)):
-            for j in range(self.num_blocks):
-                core_block.add_module(
-                    f"scale_{i}_res_{j}",
-                    BlockType(
-                        dim,
-                        bottleneck=self.bottleneck,
-                        weight_norm=self.weight_norm,
-                        transpose=True,
-                        norm="LayerNorm",
-                        activation="SiLU",
-                    ),
-                )
-            core_block.add_module(
-                f"scale_{i}_out",
-                Block(
-                    dim,
-                    dim // 2,
-                    (3, 3),
-                    stride=2,
-                    padding=1,
-                    output_padding=1,
-                    bias=True,
-                    weight_norm=self.weight_norm,
-                    scale=True,
-                    transpose=True,
-                    norm="LayerNorm",
-                    activation="SiLU",
-                ),
-            )
-            dim //= 2
-
-        assert dim == self.base_dim
-        out_block = Block(
-            dim,
-            self.in_channels,
-            (3, 3),
-            stride=1,
-            padding=1,
-            bias=True,
-            weight_norm=self.weight_norm,
-            scale=True,
-            norm="None",
-            activation="Sigmoid",
-        )
-
-        return nn.Sequential(core_block, out_block)
+        self.decoder = build_decoder(dec_cfg)
 
     def _extract_identity(self, x: torch.Tensor) -> torch.Tensor:
         x = self.id_preprocess(x)
@@ -166,9 +61,9 @@ class ConditionedVAE(BaseVAE):
 
         x = self.encoder(x)
         [_, C, H, W] = list(x.size())
-        assert C == self.feature_dim
-        assert H == self.feature_size
-        assert W == self.feature_size
+        assert C == self.enc_out_dim
+        assert H == self.enc_out_hw
+        assert W == self.enc_out_hw
 
         x = torch.flatten(x, start_dim=1)
 
@@ -192,7 +87,7 @@ class ConditionedVAE(BaseVAE):
         z = z * z_std + z_mean
 
         x = self.project(z)
-        x = x.reshape(-1, self.feature_dim, self.feature_size, self.feature_size)
+        x = x.reshape(-1, self.enc_out_dim, self.enc_out_hw, self.enc_out_hw)
         x = self.decoder(x)
         return {"output": x}
 
@@ -238,8 +133,10 @@ class ConditionedVAE(BaseVAE):
         kld_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1.0 - log_var, dim=1)
         res_dict["kld"] = kld_loss.mean().detach()
 
+        loss = nll_loss
+
         if self.loss_type == "B" and self.beta is not None:
-            loss = nll_loss + self.beta * kld_loss
+            loss += self.beta * kld_loss
         elif (
             self.loss_type == "H" and self.gamma is not None and self.C_max is not None
         ):
@@ -252,9 +149,9 @@ class ConditionedVAE(BaseVAE):
             )
             res_dict["C"] = C.detach()
             cap_kld_loss = (kld_loss - C).abs()
-            loss = nll_loss + self.gamma * cap_kld_loss
+            loss += self.gamma * cap_kld_loss
         else:
-            loss = nll_loss + kld_loss
+            loss += kld_loss
 
         loss = loss.mean()
         res_dict["loss"] = loss
