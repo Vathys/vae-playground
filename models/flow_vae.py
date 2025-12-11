@@ -1,7 +1,9 @@
+from typing import Dict, Tuple, Sequence, Union
+
 import torch
-from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Tensor
 
 from models.base import BaseVAE
 from models.blocks import build_decoder, build_encoder
@@ -163,40 +165,37 @@ class FlowVAE(BaseVAE):
         enc_cfg = kwargs["encoder"]
         dec_cfg = kwargs["decoder"]
 
-        self.encoder, self.enc_out_dim, self.enc_out_hw = build_encoder(enc_cfg)
+        self.encoder, self.enc_out_dim = build_encoder(enc_cfg)
 
-        flat_dim = self.enc_out_dim * (self.enc_out_hw**2)
+        self.fc_mu = nn.Conv2d(
+            self.enc_out_dim, self.latent_dim, kernel_size=1, stride=1
+        )
+        self.fc_var = nn.Conv2d(
+            self.enc_out_dim, self.latent_dim, kernel_size=1, stride=1
+        )
 
-        self.fc_mu = nn.Linear(flat_dim, self.latent_dim)
-        self.fc_var = nn.Linear(flat_dim, self.latent_dim)
-        self.project = nn.Linear(self.latent_dim, flat_dim)
+        self.project = nn.Conv2d(
+            self.latent_dim, self.enc_out_dim, kernel_size=1, stride=1
+        )
 
         dec_cfg["in_channels"] = self.enc_out_dim
-        dec_cfg["in_size"] = self.enc_out_hw
 
-        self.decoder = build_decoder(dec_cfg)
+        self.decoder, _ = build_decoder(dec_cfg)
 
         self.flow = Flow(self.latent_dim, self.flow_type, self.flow_length)
 
-    def encode(self, data):
+    def encode(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
         x = data["input"]
         x = self.encoder(x)
-        [_, C, H, W] = list(x.size())
-        assert C == self.enc_out_dim
-        assert H == self.enc_out_hw
-        assert W == self.enc_out_hw
-
-        x = torch.flatten(x, start_dim=1)
 
         mu = self.fc_mu(x)
         log_var = self.fc_var(x)
 
         return {"mu": mu, "log_var": log_var}
 
-    def decode(self, data):
+    def decode(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
         z = data["z"]
         x = self.project(z)
-        x = x.reshape(-1, self.enc_out_dim, self.enc_out_hw, self.enc_out_hw)
         x = self.decoder(x)
         return {"output": x}
 
@@ -207,7 +206,7 @@ class FlowVAE(BaseVAE):
 
         return self.flow(z)
 
-    def forward(self, data):
+    def forward(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
         encoded = self.encode(data)
         z, log_det = self.reparametrize(encoded["mu"], encoded["log_var"])
         decoded = self.decode({"z": z, "log_det": log_det})
@@ -219,18 +218,20 @@ class FlowVAE(BaseVAE):
             "log_var": encoded["log_var"],
         }
 
-    def loss_function(self, data):
+    def loss_function(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
+        device = next(self.parameters()).device
         x = data["input"]
         x_hat = data["output"]
-        mu = data["mu"]
-        log_var = data["log_var"]
+        mu = data["mu"].flatten(start_dim=1)
+        log_var = data["log_var"].flatten(start_dim=1)
 
-        sigma = 1.0
+        var = torch.tensor([1.0], device=device, requires_grad=True)
 
         res_dict = {}
 
-        nll_loss = F.mse_loss(x_hat, x, reduction="none")
-        nll_loss = nll_loss.view(nll_loss.size(0), -1).sum(dim=1) / (2.0 * sigma**2)
+        nll_loss = (x_hat - x).pow(2) / var
+        nll_loss = (nll_loss + torch.log(var)) / 2
+        nll_loss = nll_loss.view(nll_loss.size(0), -1).sum(dim=1)
         res_dict["nll"] = nll_loss.mean().detach()
 
         kld_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1.0 - log_var, dim=1)
@@ -244,11 +245,25 @@ class FlowVAE(BaseVAE):
 
         return res_dict
 
-    def sample_test(self, num: int, inter: int = 5, batch_size: int = 1):
+    def sample_test(
+        self,
+        latent_size: Union[int, Tuple[int, int], Sequence[int]],
+        num: int,
+        inter: int = 5,
+        batch_size: int = 1,
+    ):
         device = next(self.parameters()).device
-        anchors = torch.randn(num * 2, self.latent_dim, device=device)
+        if isinstance(latent_size, int):
+            latent_size = (latent_size, latent_size)
+        elif isinstance(latent_size, tuple):
+            latent_size = latent_size
+        else:
+            assert len(latent_size) >= 2
+            latent_size = latent_size[:2]
 
-        pairs = anchors.view(num, 2, self.latent_dim)
+        anchors = torch.randn(num * 2, self.latent_dim, *latent_size, device=device)
+
+        pairs = anchors.view(num, 2, self.latent_dim, *latent_size)
 
         all_interps = []
 
@@ -269,6 +284,8 @@ class FlowVAE(BaseVAE):
                 f"Cannot divide {total} vectors evenly into batch_size={batch_size}"
             )
 
-        batched = all_interps.view(total // batch_size, batch_size, self.latent_dim)
+        batched = all_interps.view(
+            total // batch_size, batch_size, self.latent_dim, *latent_size
+        )
 
         return [{"z": batched[i]} for i in range(batched.size(0))]

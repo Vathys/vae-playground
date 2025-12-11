@@ -1,16 +1,14 @@
 model_params:
   name: "BetaVAE"
-  latent_dim: 32
+  latent_dim: 4
   loss_type: "B"
   beta: 10
   encoder:
     in_channels: 3
-    in_size: 64
     base_dim: 8
     scales: 4
     num_blocks: 1
     channel_multiplier: 2
-    min_spatial: 4
     residual: True
     bottleneck: True
     weight_norm: False
@@ -46,13 +44,14 @@ experiment_params:
     eta_min: 0.0001
   manual_seed: 1265
   max_epochs: 100
+  test_latent_size: [4, 4]
 
 trainer_params:
   devices: 1
   strategy: "ddp"
   precision: "32-true"
-  gradient_clip_val: 1
-  gradient_clip_algorithm: value
+  gradient_clip_val: 5.0
+  gradient_clip_algorithm: norm
 
 logging_params:
   save_dir: "logs/"

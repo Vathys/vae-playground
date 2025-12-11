@@ -1,10 +1,109 @@
-from typing import Tuple
+from typing import Dict, Tuple
+
 import torch.nn as nn
+from torch import Tensor
 
 
 class Identity(nn.Module):
     def forward(self, x):
         return x
+
+
+class AdaIN(nn.Module):
+    def __init__(self, cond_dim, num_channels):
+        super().__init__()
+
+    def forward(self, x: Tensor, cond: Tensor):
+        def _get_mean_std(a):
+            a = a.flatten(start_dim=1)
+            return (
+                a.mean(dim=1, keepdim=True)[..., None, None],
+                a.std(dim=1, keepdim=True)[..., None, None],
+            )
+
+        b, s = _get_mean_std(cond)
+        x_mean, x_std = _get_mean_std(x)
+
+        x = (x - x_mean) / x_std
+
+        x = x * s + b
+
+        return x
+
+
+class FiLM(nn.Module):
+    def __init__(self, cond_dim, num_channels):
+        super().__init__()
+        self.to_scale = nn.Linear(cond_dim, num_channels)
+        self.to_shift = nn.Linear(cond_dim, num_channels)
+
+    def forward(self, x: Tensor, cond: Tensor):
+        s = self.to_scale(cond)[..., None, None]
+        b = self.to_shift(cond)[..., None, None]
+
+        return s * x + b
+
+
+class NormalizedFiLM(nn.Module):
+    def __init__(self, cond_dim, num_channels):
+        super().__init__()
+        self.to_scale = nn.Linear(cond_dim, num_channels)
+        self.to_shift = nn.Linear(cond_dim, num_channels)
+
+    def forward(self, x: Tensor, cond: Tensor):
+        def _get_mean_std(a):
+            a = a.flatten(start_dim=1)
+            return (
+                a.mean(dim=1, keepdim=True)[..., None, None],
+                a.std(dim=1, keepdim=True)[..., None, None],
+            )
+
+        x_mean, x_std = _get_mean_std(x)
+
+        s = self.to_scale(cond)[..., None, None]
+        b = self.to_shift(cond)[..., None, None]
+
+        x = s * x + b
+
+        n_x_mean, n_x_std = _get_mean_std(x)
+
+        x = (x - n_x_mean) / (n_x_std + 1e-6)
+        x = x * x_std + x_mean
+
+        return x
+
+
+class Attention(nn.Module):
+    def __init__(self, cond_dim, num_channels, attn_dim=256, attn_heads=4):
+        super().__init__()
+
+        self.q_proj = nn.Conv2d(num_channels, attn_dim, kernel_size=1)
+
+        self.k_proj = nn.Linear(cond_dim, attn_dim)
+        self.v_proj = nn.Linear(cond_dim, attn_dim)
+
+        self.mha = nn.MultiheadAttention(
+            embed_dim=attn_dim, num_heads=attn_heads, batch_first=True
+        )
+
+        self.out_proj = nn.Conv2d(attn_dim, num_channels, kernel_size=1)
+
+    def forward(self, x: Tensor, cond: Tensor):
+        B, C, H, W = x.shape
+        S = H * W
+
+        q = self.q_proj(x)
+        q = q.view(B, -1, S).permute(0, 2, 1)
+
+        k = self.k_proj(cond).unsqueeze(1)
+        v = self.v_proj(cond).unsqueeze(1)
+
+        attn_out, _ = self.mha(query=q, key=k, value=v)
+        attn_out = attn_out.permute(0, 2, 1).view(B, -1, H, W)
+
+        attn_out = self.out_proj(attn_out)
+
+        return x + attn_out
 
 
 class WeightNormConv2d(nn.Module):
@@ -31,17 +130,21 @@ class WeightNormConv2d(nn.Module):
             kernel_size: size of convolving kernel.
             stride: stride of convolution.
             padding: zero-padding added to both sides of input.
-            output_padding: for inferring output shape (only for transposed convolution).
+            output_padding: for inferring output shape
+              (only for transposed convolution).
             bias: True if include learnable bias parameters, False otherwise.
             weight_norm: True if apply weight normalization, False otherwise.
             scale: True if include magnitude parameters, False otherwise.
             transpose: True if transposed convolution, False otherwise.
         """
         super(WeightNormConv2d, self).__init__()
-        if weight_norm and scale:
-            norm_func = nn.utils.parametrizations.weight_norm
-        else:
-            norm_func = lambda x: x
+
+        def norm_func(module: nn.Module) -> nn.Module:
+            if weight_norm and scale:
+                return nn.utils.parametrizations.weight_norm(module)
+            else:
+                return module
+
         if transpose:
             self.conv = norm_func(
                 nn.ConvTranspose2d(
@@ -115,6 +218,8 @@ class Block(nn.Module):
         activation="leaky_relu",
     ):
         super().__init__()
+        self.in_channels = in_dim
+        self.out_channels = out_dim
 
         self.conv = WeightNormConv2d(
             in_dim,
@@ -259,30 +364,106 @@ class ResidualConvBlock(ConvBlock):
         return x + self.block(x)
 
 
-def build_encoder(cfg: dict) -> Tuple[nn.Module, int, int]:
+class EncoderScale(nn.Module):
+    def __init__(
+        self,
+        blocks: Dict[str, nn.Module],
+        down: Block,
+        cond_dim: int = None,
+        mix_type: str = "film",
+    ):
+        super().__init__()
+        self.blocks = nn.ModuleDict(blocks)
+        self.down = down
+
+        if cond_dim is not None:
+            if mix_type == "film":
+                self.mix_block = FiLM(cond_dim, self.down.out_channels)
+            elif mix_type == "adain":
+                self.mix_block = AdaIN(cond_dim, self.down.out_channels)
+            elif mix_type == "norm_film":
+                self.mix_block = NormalizedFiLM(cond_dim, self.down.out_channels)
+            elif mix_type == "attention":
+                self.mix_block = Attention(cond_dim, self.down.out_channels)
+            else:
+                raise ValueError(f"mix_type {mix_type} not available...")
+        else:
+            self.mix_block = None
+
+    def forward(self, x, cond=None):
+        for _, b in self.blocks.items():
+            x = b(x)
+
+        x = self.down(x)
+        if self.mix_block is not None and cond is not None:
+            x = self.mix_block(x, cond)
+
+        return x
+
+
+class DecoderScale(nn.Module):
+    def __init__(
+        self,
+        blocks: Dict[str, nn.Module],
+        up: Block,
+        cond_dim: int = None,
+        mix_type: str = "film",
+    ):
+        super().__init__()
+        self.blocks = nn.ModuleDict(blocks)
+        self.up = up
+
+        if cond_dim is not None:
+            if mix_type == "film":
+                self.mix_block = FiLM(cond_dim, self.up.out_channels)
+            elif mix_type == "adain":
+                self.mix_block = AdaIN(cond_dim, self.up.out_channels)
+            elif mix_type == "norm_film":
+                self.mix_block = NormalizedFiLM(cond_dim, self.up.out_channels)
+            elif mix_type == "attention":
+                self.mix_block = Attention(cond_dim, self.up.out_channels)
+            else:
+                raise ValueError(f"mix_type {mix_type} not available...")
+        else:
+            self.mix_block = None
+
+    def forward(self, x, cond=None):
+        for _, b in self.blocks.items():
+            x = b(x)
+
+        x = self.up(x)
+        if self.mix_block is not None and cond is not None:
+            x = self.mix_block(x, cond)
+
+        return x
+
+
+def build_encoder(cfg: dict) -> Tuple[nn.Module, int]:
     """Builds an encoder that successively scales down via convolutions.
 
     :param cfg: Encoder config
 
     Config includes:
         - in_channels: number of input channels
-        - in_size: size of (square) input image
         - base_dim: starting dimension for scaling
         - scales: number of times to scale the image
         - num_blocks: number of convolution blocks per scale
         - residual: boolean indicating whether to make blocks residual.
         - channel_multiplier: multiplier to increase channels per scale.
-        - min_spatial: minimum size when scaling; images won't be scaled above this size.
         - bottleneck: whether scale block should include a bottleneck
         - weight_norm: whether to normalize weights
         - norm: normalization block to use
         - activation: activation to use
+        - cond_dim: dimension of conditioning vector (default: None)
+        - mix_type: type of mixing to apply to conditioning (default: film)
 
     :type cfg: dict
-    :return: Tuple with encoder, out dimension and output size
+    :return: Tuple with encoder, output dimension and output size
     :rtype: Tuple[Module, int, int]
     """
     BlockType = ResidualConvBlock if cfg["residual"] else ConvBlock
+    cond_dim = cfg.get("cond_dim", None)
+    mix_type = cfg.get("mix_type", "film")
 
     in_block = Block(
         cfg["in_channels"],
@@ -297,58 +478,60 @@ def build_encoder(cfg: dict) -> Tuple[nn.Module, int, int]:
         activation=cfg["activation"],
     )
 
-    core = nn.Sequential()
+    scales = nn.ModuleDict()
     dim = cfg["base_dim"]
-    spatial = cfg["in_size"]
 
     for i in range(cfg["scales"]):
+        blocks = {}
         for j in range(cfg["num_blocks"]):
-            core.add_module(
-                f"scale_{i}_block_{j}",
-                BlockType(
-                    dim,
-                    bottleneck=cfg["bottleneck"],
-                    weight_norm=cfg["weight_norm"],
-                    norm=cfg["norm"],
-                    activation=cfg["activation"],
-                ),
+            blocks[f"scale_{i}_block_{j}"] = BlockType(
+                dim,
+                bottleneck=cfg["bottleneck"],
+                weight_norm=cfg["weight_norm"],
+                norm=cfg["norm"],
+                activation=cfg["activation"],
             )
 
-        if spatial > cfg["min_spatial"]:
-            out_dim = int(dim * cfg["channel_multiplier"])
-            core.add_module(
-                f"scale_{i}_down",
-                Block(
-                    dim,
-                    out_dim,
-                    (3, 3),
-                    stride=2,
-                    padding=1,
-                    bias=True,
-                    weight_norm=cfg["weight_norm"],
-                    scale=True,
-                    norm=cfg["norm"],
-                    activation=cfg["activation"],
-                ),
-            )
-            spatial //= 2
-            dim = out_dim
-        else:
-            print(f"Skipping scale {i}. Cannot scale beyond {cfg['min_spatial']}.")
+        out_dim = int(dim * cfg["channel_multiplier"])
+        down = Block(
+            dim,
+            out_dim,
+            (3, 3),
+            stride=2,
+            padding=1,
+            bias=True,
+            weight_norm=cfg["weight_norm"],
+            scale=True,
+            norm=cfg["norm"],
+            activation=cfg["activation"],
+        )
+        scales[f"scale_{i}"] = EncoderScale(blocks, down, cond_dim, mix_type)
+        dim = out_dim
 
-    encoder = nn.Sequential(in_block, core)
-    return encoder, dim, spatial
+    class Encoder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.in_block = in_block
+            self.scales = scales
+
+        def forward(self, x, cond=None):
+            x = self.in_block(x)
+            for _, s in self.scales.items():
+                x = s(x, cond)
+            return x
+
+    return Encoder(), dim
 
 
-def build_decoder(cfg: dict) -> nn.Module:
+def build_decoder(cfg: dict) -> Tuple[nn.Module, int]:
     """Builds a decoder that successively scales up via convolutions.
 
     :param cfg: Decoder config:
 
     Config includes:
         - in_channels: number of input channels
-        - in_size: size of (square) input image
-        - out_channels: number of output channels
+        - out_channels: number of output channels;
+          if none, then no final block is applied
         - scales: number of times to scale the image
         - num_blocks: number of convolution blocks per scale
         - residual: boolean indicating whether to make blocks residual.
@@ -358,68 +541,81 @@ def build_decoder(cfg: dict) -> nn.Module:
         - norm: normalization block to use
         - activation: activation to use
         - final_activation: activation to use in the final convolution.
+        - cond_dim: dimension of conditioning vector (default: None)
+        - mix_type: type of mixing to apply to conditioning (default: film)
 
     :type cfg: dict
-    :param start_dim: Description
-    :type start_dim: int
-    :param start_hw: Description
-    :type start_hw: int
-    :return: Description
-    :rtype: Module
+    :return: Tuple with decoder, output dimension and output size
+    :rtype: Tuple[Module, int, int]
     """
     BlockType = ResidualConvBlock if cfg["residual"] else ConvBlock
+    cond_dim = cfg.get("cond_dim", None)
+    mix_type = cfg.get("mix_type", "film")
 
     dim = cfg["in_channels"]
-    spatial = cfg["in_size"]
 
-    core = nn.Sequential()
+    scales = nn.ModuleDict()
 
     for i in reversed(range(cfg["scales"])):
+        blocks = {}
         for j in range(cfg["num_blocks"]):
-            core.add_module(
-                f"scale_{i}_block_{j}",
-                BlockType(
-                    dim,
-                    bottleneck=cfg["bottleneck"],
-                    weight_norm=cfg["weight_norm"],
-                    transpose=True,
-                    norm=cfg["norm"],
-                    activation=cfg["activation"],
-                ),
-            )
-
-        out_dim = int(dim * cfg["channel_multiplier"])
-        core.add_module(
-            f"scale_{i}_up",
-            Block(
+            blocks[f"scale_{i}_block_{j}"] = BlockType(
                 dim,
-                out_dim,
-                (3, 3),
-                stride=2,
-                padding=1,
-                output_padding=1,
-                bias=True,
+                bottleneck=cfg["bottleneck"],
                 weight_norm=cfg["weight_norm"],
-                scale=True,
                 transpose=True,
                 norm=cfg["norm"],
                 activation=cfg["activation"],
-            ),
+            )
+
+        out_dim = int(dim * cfg["channel_multiplier"])
+        up = Block(
+            dim,
+            out_dim,
+            (3, 3),
+            stride=2,
+            padding=1,
+            output_padding=1,
+            bias=True,
+            weight_norm=cfg["weight_norm"],
+            scale=True,
+            transpose=True,
+            norm=cfg["norm"],
+            activation=cfg["activation"],
         )
+        scales[f"scale_{i}"] = DecoderScale(blocks, up, cond_dim, mix_type)
+
         dim = out_dim
-        spatial *= 2
 
-    out_block = Block(
-        dim,
-        cfg["out_channels"],
-        (3, 3),
-        stride=1,
-        padding=1,
-        bias=True,
-        weight_norm=cfg["weight_norm"],
-        scale=True,
-        norm="none",
-        activation=cfg["final_activation"],
-    )
+    if cfg["out_channels"] is not None:
+        out_block = Block(
+            dim,
+            cfg["out_channels"],
+            (3, 3),
+            stride=1,
+            padding=1,
+            bias=True,
+            weight_norm=cfg["weight_norm"],
+            scale=True,
+            norm="none",
+            activation=cfg["final_activation"],
+        )
+        dim = cfg["out_channels"]
+    else:
+        out_block = None
 
-    return nn.Sequential(core, out_block)
+    class Decoder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.scales = scales
+            self.out_block = out_block
+
+        def forward(self, x, cond=None):
+            for _, s in self.scales.items():
+                x = s(x, cond)
+            if self.out_block:
+                x = self.out_block(x)
+
+            return x
+
+    return Decoder(), dim

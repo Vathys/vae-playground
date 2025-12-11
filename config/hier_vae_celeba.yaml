@@ -1,29 +1,31 @@
 model_params:
-  name: "ConditionedVAE"
-  latent_dim: 32
-  identity_model_path: "magface_r18.pth"
-  loss_type: H
-  gamma: 10
-  max_capacity: 50
-  C_stop_epoch: 60
-  encoder:
+  name: "HierarchicalVAE"
+  latent_dim1: 8
+  latent_dim2: 4
+  encoder1:
     in_channels: 3
-    in_size: 64
     base_dim: 8
-    scales: 4
-    num_blocks: 1
+    scales: 1
+    num_blocks: 2
     channel_multiplier: 2
-    min_spatial: 4
     residual: True
     bottleneck: True
     weight_norm: False
     norm: "layer"
     activation: "silu"
-    cond_dim: 512
-    mix_type: "adain"
-  decoder:
-    out_channels: 3
-    scales: 4
+  encoder2:
+    base_dim: 16
+    scales: 3
+    num_blocks: 1
+    channel_multiplier: 2
+    residual: True
+    bottleneck: True
+    weight_norm: False
+    norm: "layer"
+    activation: "silu"
+  decoder2:
+    out_channels: null
+    scales: 3
     num_blocks: 1
     channel_multiplier: 0.5
     residual: True
@@ -31,9 +33,17 @@ model_params:
     weight_norm: False
     norm: "layer"
     activation: "silu"
+  decoder1:
+    out_channels: 3
+    scales: 1
+    num_blocks: 2
+    channel_multiplier: 0.5
+    residual: True
+    bottleneck: True
+    weight_norm: False
+    norm: "layer"
+    activation: "silu"
     final_activation: "sigmoid"
-    cond_dim: 512
-    mix_type: "adain"
 
 data_params:
   dataset: "celeba"
@@ -53,7 +63,7 @@ experiment_params:
     eta_min: 0.00005
   manual_seed: 1265
   max_epochs: 100
-  test_latent_size: [4, 4]
+  test_latent_size: [32, 32, 4, 4]
 
 trainer_params:
   devices: 1
@@ -64,4 +74,4 @@ trainer_params:
 
 logging_params:
   save_dir: "logs/"
-  name: "ConditionedVAE"
+  name: "HierarchicalVAE"

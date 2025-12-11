@@ -1,11 +1,9 @@
-import torch
-
 import logging
 import time
 
+import torch
 from lightning.pytorch import Callback
 from lightning.pytorch.utilities import rank_zero_only
-from lightning.pytorch.utilities.types import STEP_OUTPUT
 
 logger = logging.getLogger(__name__)
 
@@ -122,31 +120,51 @@ def lerp_z(z1: torch.Tensor, z2: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
     """
     Calculate the lerp between two tensors z1, z2 with time values t.
 
-    :param z1: tensor of size n
+    :param z1: tensor of shape [...]
     :type z1: torch.Tensor
-    :param z2: tensor of size n
+    :param z2: tensor of shape [...]
     :type z2: torch.Tensor
-    :param t: tensor of size t
+    :param t: tensor of [k] in [0, 1]
     :type t: torch.Tensor
-    :return: tensor of size [t, n]
+    :return: tensor of size [k, ...]
     :rtype: torch.Tensor
     """
-    return (1 - t[:, None]) * z1[None, :] + t[:, None] * z2[None, :]
+    if z1.shape != z2.shape:
+        raise ValueError(
+            f"z1 ({z1.shape}) and z2 ({z2.shape}) must have the same shape..."
+        )
+    if t.dim() != 1:
+        raise ValueError(f"t must be 1D, got shape {t.shape}")
+
+    expand_shape = (t.shape[0],) + (1,) * z1.dim()
+    t_reshaped = t.view(expand_shape)
+
+    return z1.unsqueeze(0) * (1 - t_reshaped) + z2.unsqueeze(0) * t_reshaped
 
 
 def slerp_z(z1: torch.Tensor, z2: torch.Tensor, t: torch.Tensor):
     """
     Calculate the spherical lerp between two tensors z1, z2 with time values t.
 
-    :param z1: tensor of size n
+    :param z1: tensor of shape [...]
     :type z1: torch.Tensor
-    :param z2: tensor of size n
+    :param z2: tensor of shape [...]
     :type z2: torch.Tensor
-    :param t: tensor of size t
+    :param t: tensor of size [k] in [0, 1]
     :type t: torch.Tensor
-    :return: tensor of size [t, n]
+    :return: tensor of size [k, ...]
     :rtype: torch.Tensor
     """
+    if z1.shape != z2.shape:
+        raise ValueError(
+            f"z1 ({z1.shape}) and z2 ({z2.shape}) must have the same shape..."
+        )
+    if t.dim() != 1:
+        raise ValueError(f"t must be 1D, got shape {t.shape}")
+
+    expand_shape = (t.shape[0],) + (1,) * z1.dim()
+    t_reshaped = t.view(expand_shape)
+
     z1 = z1 / z1.norm()
     z2 = z2 / z2.norm()
 
@@ -154,7 +172,7 @@ def slerp_z(z1: torch.Tensor, z2: torch.Tensor, t: torch.Tensor):
     theta = torch.acos(dot)
     sin_theta = torch.sin(theta)
 
-    t1 = (torch.sin((1 - t[:, None]) * theta) / sin_theta) * z1[None, :]
-    t2 = (torch.sin(t[:, None] * theta) / sin_theta) * z2[None, :]
+    t1 = (torch.sin((1 - t_reshaped) * theta) / sin_theta) * z1
+    t2 = (torch.sin(t_reshaped * theta) / sin_theta) * z2
 
     return t1 + t2

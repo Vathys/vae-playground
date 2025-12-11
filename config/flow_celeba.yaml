@@ -1,16 +1,14 @@
 model_params:
   name: "FlowVAE"
-  latent_dim: 32
+  latent_dim: 4
   flow_type: nice
   flow_length: 8
   encoder:
     in_channels: 3
-    in_size: 64
     base_dim: 8
     scales: 4
     num_blocks: 1
     channel_multiplier: 2
-    min_spatial: 4
     residual: True
     bottleneck: True
     weight_norm: False
@@ -37,16 +35,23 @@ data_params:
   num_workers: 8
   pin_memory: True
 
-exp_params:
-  LR: 0.005
-  weight_decay: 0.0
-  scheduler_gamma: 0.95
+experiment_params:
+  optim1:
+    lr: 0.0005
+    weight_decay: 0.0
+    warmup_epochs: 5
+    warmup_start_lr: 0.00005
+    eta_min: 0.00005
   manual_seed: 1265
+  max_epochs: 100
+  test_latent_size: [4, 4]
 
 trainer_params:
   devices: 1
   strategy: "ddp"
-  max_epochs: 100
+  precision: "32-true"
+  gradient_clip_val: 5.0
+  gradient_clip_algorithm: norm
 
 logging_params:
   save_dir: "logs/"

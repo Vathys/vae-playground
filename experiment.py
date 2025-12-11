@@ -1,10 +1,10 @@
-import torch
-from torch import Tensor
-from torch import optim
-from models import vae_models
 import lightning as L
+import torch
 import torchvision.utils as vutils
 from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
+from torch import Tensor, optim
+
+from models import getVAE
 
 
 class VAEExperiment(L.LightningModule):
@@ -12,7 +12,7 @@ class VAEExperiment(L.LightningModule):
     def __init__(self, model_params, experiment_params) -> None:
         super().__init__()
 
-        self.model = vae_models[model_params["name"]](**model_params)
+        self.model = getVAE(model_params["name"], **model_params)
         self.params = experiment_params
 
         self.test_input = None
@@ -26,6 +26,7 @@ class VAEExperiment(L.LightningModule):
     def training_step(self, batch, batch_idx):
         results = self.forward(batch)
         results["global_step"] = self.global_step
+        results["current_epoch"] = self.current_epoch
         train_loss = self.model.loss_function(results)
 
         self.log_dict(
@@ -45,6 +46,7 @@ class VAEExperiment(L.LightningModule):
 
         results = self.forward(batch)
         results["global_step"] = self.global_step
+        results["current_epoch"] = self.current_epoch
         val_loss = self.model.loss_function(results)
 
         self.log_dict(
@@ -76,25 +78,27 @@ class VAEExperiment(L.LightningModule):
             self.test_input = {"input": batch["input"][:25]}
 
         if self.test_latents is None:
+            z1 = self.model.sample_test(self.params["test_latent_size"], 5, 5, 25)
             z = self.model.sample_test(5, 5, 25)
 
-            self.test_latents = z
+            self.test_latents = [z1]
 
     def sample_images(self):
         output = self.model.forward(self.test_input)["output"]
         grid = vutils.make_grid(output, nrow=5)
         self.logger.experiment.add_image("reconstruction", grid, self.global_step)
 
-        try:
-            result = []
-            for latent in self.test_latents:
-                result.append(self.model.decode(latent)["output"])
-            result = torch.cat(result, dim=0)
+        for i, tests in enumerate(self.test_latents):
+            try:
+                result = []
+                for latent in tests:
+                    result.append(self.model.decode(latent)["output"])
+                result = torch.cat(result, dim=0)
 
-            grid = vutils.make_grid(result, nrow=5)
-            self.logger.experiment.add_image("samples", grid, self.global_step)
-        except Warning:
-            pass
+                grid = vutils.make_grid(result, nrow=5)
+                self.logger.experiment.add_image(f"samples {i}", grid, self.global_step)
+            except Warning:
+                pass
 
     def configure_optimizers(self):
         optims = []
