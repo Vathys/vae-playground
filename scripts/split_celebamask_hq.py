@@ -1,6 +1,6 @@
-from pathlib import Path
 import os
 import random
+from pathlib import Path
 
 DATA_PATH = Path("/mnt/ext-data-01/data")
 SPLIT_RATIO = 0.25

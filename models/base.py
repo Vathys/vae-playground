@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Dict, List, Tuple, Sequence, Union
+from typing import Dict, List, Sequence, Tuple, Union
 
 import torch.nn as nn
 from torch import Tensor

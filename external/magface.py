@@ -55,7 +55,8 @@ class IBasicBlock(nn.Module):
             raise ValueError("BasicBlock only supports groups=1 and base_width=64")
         if dilation > 1:
             raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
-        # Both self.conv1 and self.downsample layers downsample the input when stride != 1
+        # Both self.conv1 and self.downsample layers
+        # downsample the input when stride != 1
         self.bn1 = nn.BatchNorm2d(inplanes, eps=2e-05, momentum=0.9)
         self.conv1 = conv3x3(inplanes, planes)
         self.bn2 = nn.BatchNorm2d(planes, eps=2e-05, momentum=0.9)
@@ -302,7 +303,8 @@ def clean_dict(model, state_dict):
     num_ckpt = len(_state_dict.keys())
     if num_model != num_ckpt:
         raise ValueError(
-            f"Not all weights loaded, model params: {num_model}, loaded_params: {num_ckpt}"
+            "Not all weights loaded, "
+            f"model params: {num_model}, loaded_params: {num_ckpt}"
         )
 
     return _state_dict

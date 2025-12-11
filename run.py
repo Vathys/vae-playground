@@ -1,12 +1,14 @@
-import os
-import yaml
 import argparse
-from experiment import VAEExperiment
-from lightning.pytorch import Trainer, seed_everything
-from lightning.pytorch.loggers import TensorBoardLogger
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+import os
+
 import torch
+import yaml
+from lightning.pytorch import Trainer, seed_everything
+from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.loggers import TensorBoardLogger
+
 from dataset import VAEDataset
+from experiment import VAEExperiment
 from utils import LogPerformanceCallback
 
 parser = argparse.ArgumentParser(description="Generic runner for VAE models")
