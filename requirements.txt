@@ -1,0 +1,9 @@
+torch
+torchvision
+lightning
+lightning-bolts
+numpy
+matplotlib
+Pillow
+torchmetrics[image]
+lpips
