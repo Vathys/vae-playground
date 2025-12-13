@@ -6,7 +6,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from models.base import BaseVAE
-from models.blocks import build_decoder, build_encoder
+from models.blocks import build_network
 from utils import lerp_z
 
 
@@ -21,33 +21,30 @@ class HierarchicalVAE(BaseVAE):
         dec2_cfg = kwargs["decoder2"]
         dec1_cfg = kwargs["decoder1"]
 
-        self.encoder1, self.enc_out_dim1 = build_encoder(enc1_cfg)
+        self.encoder1, self.enc_out_dim1 = build_network(enc1_cfg)
 
         self.fc_mu1 = nn.Conv2d(
-            self.enc_out_dim1, self.latent1_dim, kernel_size=1, stride=1
+            self.enc_out_dim1, self.latent1_dim, kernel_size=3, stride=1, padding=1
         )
         self.fc_var1 = nn.Conv2d(
-            self.enc_out_dim1, self.latent1_dim, kernel_size=1, stride=1
+            self.enc_out_dim1, self.latent1_dim, kernel_size=3, stride=1, padding=1
         )
 
         enc2_cfg["in_channels"] = self.enc_out_dim1
 
-        self.encoder2, self.enc_out_dim2 = build_encoder(enc2_cfg)
+        self.encoder2, self.enc_out_dim2 = build_network(enc2_cfg)
 
         self.fc_mu2 = nn.Conv2d(
-            self.enc_out_dim2, self.latent2_dim, kernel_size=1, stride=1
+            self.enc_out_dim2, self.latent2_dim, kernel_size=3, stride=1, padding=1
         )
         self.fc_var2 = nn.Conv2d(
-            self.enc_out_dim2, self.latent2_dim, kernel_size=1, stride=1
+            self.enc_out_dim2, self.latent2_dim, kernel_size=3, stride=1, padding=1
         )
 
-        self.project2 = nn.Conv2d(
-            self.latent2_dim, self.enc_out_dim2, kernel_size=1, stride=1
-        )
+        dec2_cfg["in_channels"] = self.latent2_dim
+        dec2_cfg["base_dim"] = self.enc_out_dim2
 
-        dec2_cfg["in_channels"] = self.enc_out_dim2
-
-        self.decoder2, self.dec_out_dim2 = build_decoder(dec2_cfg)
+        self.decoder2, self.dec_out_dim2 = build_network(dec2_cfg)
 
         self.prior_fc_mu = nn.Conv2d(
             self.dec_out_dim2, self.latent1_dim, kernel_size=1, stride=1
@@ -57,12 +54,16 @@ class HierarchicalVAE(BaseVAE):
         )
 
         self.project1 = nn.Conv2d(
-            self.latent1_dim, self.dec_out_dim2, kernel_size=1, stride=1
+            self.latent1_dim,
+            self.dec_out_dim2,
+            kernel_size=dec1_cfg["kernel_size"],
+            stride=1,
+            padding=dec1_cfg["kernel_size"] // 2,
         )
 
         dec1_cfg["in_channels"] = self.dec_out_dim2 * 2
 
-        self.decoder1, self.dec_out_dim1 = build_decoder(dec1_cfg)
+        self.decoder1, self.dec_out_dim1 = build_network(dec1_cfg)
 
     def encode(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
         x = data["input"]
@@ -77,16 +78,15 @@ class HierarchicalVAE(BaseVAE):
         mu2 = self.fc_mu2(enc2)
         log_var2 = self.fc_var2(enc2)
 
-        return {"mu1": mu1, "log_var1": log_var1, "mu2": mu2, "log_var2": log_var2}
+        return {"mu": [mu1, mu2], "log_var": [log_var1, log_var2]}
 
     def decode(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
         z1 = data["z1"]
         z2 = data["z2"]
 
-        x2 = self.project2(z2)
         x1 = self.project1(z1)
 
-        dec2 = self.decoder2(x2)
+        dec2 = self.decoder2(z2)
 
         prior_mu = self.prior_fc_mu(dec2)
         prior_log_var = self.prior_fc_var(dec2)
@@ -94,6 +94,42 @@ class HierarchicalVAE(BaseVAE):
         dec1 = self.decoder1(torch.concat([x1, dec2], dim=1))
 
         return {"output": dec1, "prior_mu": prior_mu, "prior_log_var": prior_log_var}
+
+    def sample(
+        self, latent_size: Union[int, Tuple[int, int], Sequence[int]], batch_size: int
+    ):
+        if isinstance(latent_size, int):
+            warnings.warn(
+                f"received only 1 latent size {latent_size}...\n"
+                "predicting latent size #2 from latent size #1..."
+            )
+            latent_size1 = (latent_size, latent_size)
+            latent_size2 = (latent_size // 2, latent_size // 2)
+        elif isinstance(latent_size, tuple):
+            warnings.warn(
+                f"received only 1 latent size {latent_size}...\n"
+                "predicting latent size #2 from latent size #1..."
+            )
+            latent_size1 = latent_size
+            latent_size2 = (latent_size[0] // 2, latent_size[1] // 2)
+        else:
+            assert len(latent_size) >= 4
+            latent_size1 = (latent_size[0], latent_size[1])
+            latent_size2 = (latent_size[2], latent_size[3])
+
+        latents1 = torch.randn(
+            batch_size, self.latent1_dim, *latent_size1, device=self.device
+        )
+        latents2 = torch.randn(
+            batch_size, self.latent2_dim, *latent_size2, device=self.device
+        )
+
+        return {
+            "z1": latents1,
+            "z2": latents2,
+            "latent_size1": latent_size1,
+            "latent_size2": latent_size2,
+        }
 
     def reparametrize(self, mu: Tensor, log_var: Tensor) -> Tensor:
         std = torch.exp(0.5 * log_var)
@@ -103,18 +139,16 @@ class HierarchicalVAE(BaseVAE):
     def forward(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
         encoded = self.encode(data)
 
-        z1 = self.reparametrize(encoded["mu1"], encoded["log_var1"])
-        z2 = self.reparametrize(encoded["mu2"], encoded["log_var2"])
+        z1 = self.reparametrize(encoded["mu"][0], encoded["log_var"][0])
+        z2 = self.reparametrize(encoded["mu"][1], encoded["log_var"][1])
 
         decoded = self.decode({"z1": z1, "z2": z2})
 
         return {
             "input": data["input"],
             "output": decoded["output"],
-            "mu1": encoded["mu1"],
-            "log_var1": encoded["log_var1"],
-            "mu2": encoded["mu2"],
-            "log_var2": encoded["log_var2"],
+            "mu": encoded["mu"],
+            "log_var": encoded["log_var"],
             "prior_mu": decoded["prior_mu"],
             "prior_log_var": decoded["prior_log_var"],
         }
@@ -123,10 +157,10 @@ class HierarchicalVAE(BaseVAE):
         device = next(self.parameters()).device
         x = data["input"]
         x_hat = data["output"]
-        mu1 = data["mu1"].flatten(start_dim=1)
-        log_var1 = data["log_var1"].flatten(start_dim=1)
-        mu2 = data["mu2"].flatten(start_dim=1)
-        log_var2 = data["log_var2"].flatten(start_dim=1)
+        mu1 = data["mu"][0].flatten(start_dim=1)
+        log_var1 = data["log_var"][0].flatten(start_dim=1)
+        mu2 = data["mu"][1].flatten(start_dim=1)
+        log_var2 = data["log_var"][1].flatten(start_dim=1)
         prior_mu = data["prior_mu"].flatten(start_dim=1)
         prior_log_var = data["prior_log_var"].flatten(start_dim=1)
 
@@ -167,34 +201,14 @@ class HierarchicalVAE(BaseVAE):
         inter: int = 5,
         batch_size: int = 1,
     ):
-        device = next(self.parameters()).device
-        if isinstance(latent_size, int):
-            warnings.warn(
-                f"received only 1 latent size {latent_size}...\n"
-                "predicting latent size #2 from latent size #1..."
-            )
-            latent_size1 = (latent_size, latent_size)
-            latent_size2 = (latent_size // 2, latent_size // 2)
-        elif isinstance(latent_size, tuple):
-            warnings.warn(
-                f"received only 1 latent size {latent_size}...\n"
-                "predicting latent size #2 from latent size #1..."
-            )
-            latent_size1 = latent_size
-            latent_size2 = (latent_size[0] // 2, latent_size[1] // 2)
-        else:
-            assert len(latent_size) >= 4
-            latent_size1 = (latent_size[0], latent_size[1])
-            latent_size2 = (latent_size[2], latent_size[3])
-
         p_num = num // 2
 
-        anchors1 = torch.randn(
-            p_num * 2, self.latent1_dim, *latent_size1, device=device
-        )
-        anchors2 = torch.randn(
-            p_num * 2, self.latent2_dim, *latent_size2, device=device
-        )
+        samples = self.sample(latent_size, p_num * 2)
+
+        anchors1 = samples["z1"]
+        anchors2 = samples["z2"]
+        latent_size1 = samples["latent_size1"]
+        latent_size2 = samples["latent_size2"]
 
         pair1 = anchors1.view(p_num, 2, self.latent1_dim, *latent_size1)
         pair2 = anchors2.view(p_num, 2, self.latent2_dim, *latent_size2)
@@ -202,7 +216,7 @@ class HierarchicalVAE(BaseVAE):
         all_z1 = []
         all_z2 = []
 
-        t_vals = torch.linspace(0, 1, inter, device=device)
+        t_vals = torch.linspace(0, 1, inter, device=self.device)
 
         for i in range(p_num):
             z11, z12 = pair1[i]
@@ -221,10 +235,9 @@ class HierarchicalVAE(BaseVAE):
             all_z2.append(interped2)
 
         if num % 2 == 1:
-            extra_anchors1 = torch.randn(
-                2, self.latent1_dim, *latent_size1, device=device
-            )
-            extra_anchor2 = torch.randn(self.latent2_dim, *latent_size2, device=device)
+            extra_samples = self.sample(latent_size, 2)
+            extra_anchors1 = extra_samples["z1"]
+            extra_anchor2 = extra_samples["z2"][0]
 
             z1 = extra_anchors1[0]
             z2 = extra_anchors1[1]

@@ -1,57 +1,32 @@
 model_params:
-  name: "HierarchicalVAE"
-  latent_dim1: 8
-  latent_dim2: 4
-  encoder1:
+  name: "SwapVAE"
+  latent_dim: 4
+  gamma: 10
+  max_capacity: 60
+  C_stop_epoch: 140
+  lpips_weight: 400
+  encoder:
     in_channels: 3
     base_dim: 8
-    scales: 1
-    num_blocks: 2
-    channel_multiplier: 2
-    transpose: False
-    kernel_size: 5
-    residual: True
-    bottleneck: True
-    weight_norm: False
-    norm: "layer"
-    activation: "silu"
-  encoder2:
-    base_dim: 16
-    scales: 3
+    scales: 4
     num_blocks: 1
     channel_multiplier: 2
-    transpose: False
-    kernel_size: 5
     residual: True
     bottleneck: True
     weight_norm: False
     norm: "layer"
     activation: "silu"
-  decoder2:
-    scales: 3
-    num_blocks: 1
-    channel_multiplier: 0.5
-    transpose: True
-    kernel_size: 5
-    residual: True
-    bottleneck: True
-    weight_norm: False
-    norm: "layer"
-    activation: "silu"
-  decoder1:
+  decoder:
     out_channels: 3
-    scales: 1
-    num_blocks: 2
+    scales: 4
+    num_blocks: 1
     channel_multiplier: 0.5
-    transpose: True
-    kernel_size: 5
     residual: True
     bottleneck: True
     weight_norm: False
     norm: "layer"
     activation: "silu"
     final_activation: "sigmoid"
-    upscale_out: True
 
 data_params:
   dataset: "celeba"
@@ -70,9 +45,8 @@ experiment_params:
     warmup_start_lr: 0.00005
     eta_min: 0.00005
   manual_seed: 1265
-  max_epochs: 100
-  test_latent_size: [32, 32, 4, 4]
-  metrics: ["lpips", "ssim", "psnr", "fid"]
+  max_epochs: 200
+  test_latent_size: [4, 4]
 
 trainer_params:
   devices: 1
@@ -83,4 +57,4 @@ trainer_params:
 
 logging_params:
   save_dir: "logs/"
-  name: "HierarchicalVAE"
+  name: "SwapVAE"

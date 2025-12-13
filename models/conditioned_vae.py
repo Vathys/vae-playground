@@ -8,7 +8,7 @@ from torchvision import transforms as T
 
 from external.magface import load_magface
 from models.base import BaseVAE
-from models.blocks import build_decoder, build_encoder
+from models.blocks import build_network
 from utils import lerp_z, slerp_z
 
 
@@ -34,28 +34,28 @@ class ConditionedVAE(BaseVAE):
         enc_cfg = kwargs["encoder"]
         dec_cfg = kwargs["decoder"]
 
-        self.encoder, self.enc_out_dim = build_encoder(enc_cfg)
+        self.encoder, self.enc_out_dim = build_network(enc_cfg)
 
         self.fc_mu = nn.Conv2d(
-            self.enc_out_dim, self.latent_dim, kernel_size=1, stride=1
+            self.enc_out_dim, self.latent_dim, kernel_size=3, stride=1, padding=1
         )
         self.fc_var = nn.Conv2d(
-            self.enc_out_dim, self.latent_dim, kernel_size=1, stride=1
+            self.enc_out_dim, self.latent_dim, kernel_size=3, stride=1, padding=1
         )
 
         self.project = nn.Conv2d(
-            self.latent_dim, self.enc_out_dim, kernel_size=1, stride=1
+            self.latent_dim, self.enc_out_dim, kernel_size=3, stride=1, padding=1
         )
 
-        dec_cfg["in_channels"] = self.enc_out_dim
+        dec_cfg["in_channels"] = self.latent_dim
+        dec_cfg["base_dim"] = self.enc_out_dim
 
-        self.decoder, _ = build_decoder(dec_cfg)
+        self.decoder, self.dec_out_dim = build_network(dec_cfg)
 
     def _extract_identity(self, x: torch.Tensor) -> torch.Tensor:
         x = self.id_preprocess(x)
 
         feat = self.identity_model(x)
-        feat = feat / feat.norm(dim=1, keepdim=True)
 
         return feat
 
@@ -72,10 +72,28 @@ class ConditionedVAE(BaseVAE):
     def decode(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
         z = data["z"]
         cond = data.get("cond", None)
-
-        x = self.project(z)
-        x = self.decoder(x, cond)
+        x = self.decoder(z, cond)
         return {"output": x}
+
+    def sample(
+        self, latent_size: Union[int, Tuple[int, int], Sequence[int]], batch_size: int
+    ):
+        if isinstance(latent_size, int):
+            latent_size = (latent_size, latent_size)
+        elif isinstance(latent_size, tuple):
+            latent_size = latent_size
+        else:
+            assert len(latent_size) >= 2
+            latent_size = latent_size[:2]
+
+        z_latents = torch.randn(
+            batch_size, self.latent_dim, *latent_size, device=self.device
+        )
+        c_rad = 1 + 0.05 * torch.randn(batch_size, 1, device=self.device)
+        c_latents = torch.randn(batch_size, self.id_dim, device=self.device)
+        c_latents = c_rad * c_latents / c_latents.norm(dim=1, keepdim=True)
+
+        return {"z": z_latents, "cond": c_latents, "latent_size": latent_size}
 
     def reparametrize(self, mu: Tensor, log_var: Tensor) -> Tensor:
         std = torch.exp(0.5 * log_var)
@@ -87,9 +105,7 @@ class ConditionedVAE(BaseVAE):
         feat = self._extract_identity(x)
 
         encoded = self.encode({**data, "cond": feat})
-
         z = self.reparametrize(encoded["mu"], encoded["log_var"])
-
         decoded = self.decode({"z": z, "cond": feat})
 
         return {
@@ -165,21 +181,12 @@ class ConditionedVAE(BaseVAE):
         inter: int = 5,
         batch_size: int = 1,
     ):
-        device = next(self.parameters()).device
-        if isinstance(latent_size, int):
-            latent_size = (latent_size, latent_size)
-        elif isinstance(latent_size, tuple):
-            latent_size = latent_size
-        else:
-            assert len(latent_size) >= 2
-            latent_size = latent_size[:2]
-
         p_num = num // 2
 
-        z_anchors = torch.randn(p_num * 2, self.latent_dim, *latent_size, device=device)
-        f_rad = 1 + 0.05 * torch.randn(p_num * 2, 1, device=device)
-        f_anchors = torch.randn(p_num * 2, self.id_dim, device=device)
-        f_anchors = f_rad * f_anchors / f_anchors.norm(dim=1, keepdim=True)
+        samples = self.sample(latent_size, p_num * 2)
+        z_anchors = samples["z"]
+        f_anchors = samples["cond"]
+        latent_size = samples["latent_size"]
 
         z_pairs = z_anchors.view(p_num, 2, self.latent_dim, *latent_size)
         f_pairs = f_anchors.view(p_num, 2, self.id_dim)
@@ -187,7 +194,7 @@ class ConditionedVAE(BaseVAE):
         all_z = []
         all_f = []
 
-        t_vals = torch.linspace(0, 1, inter, device=device)
+        t_vals = torch.linspace(0, 1, inter, device=self.device)
 
         for i in range(p_num):
             z1 = z_pairs[i, 0]
@@ -216,14 +223,9 @@ class ConditionedVAE(BaseVAE):
             all_f.append(f_interp)
 
         if num % 2 == 1:
-            extra_z_anchors = torch.randn(
-                2, self.latent_dim, *latent_size, device=device
-            )
-            extra_f_rad = 1 + 0.05 * torch.randn(1, 1, device=device)
-            extra_f_anchor = torch.randn(1, self.id_dim, device=device)
-            extra_f_anchor = (
-                extra_f_rad * extra_f_anchor / extra_f_anchor.norm(dim=1, keepdim=True)
-            )
+            extra_samples = self.sample(latent_size, 2)
+            extra_z_anchors = extra_samples["z"]
+            extra_f_anchor = extra_samples["cond"][0]
 
             z1 = extra_z_anchors[0]
             z2 = extra_z_anchors[1]

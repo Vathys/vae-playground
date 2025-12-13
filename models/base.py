@@ -1,19 +1,29 @@
 from abc import abstractmethod
 from typing import Dict, List, Sequence, Tuple, Union
 
+import torch
 import torch.nn as nn
 from torch import Tensor
 
 
 class BaseVAE(nn.Module):
-
-    def __init__(self) -> None:
+    def __init__(self):
         super().__init__()
+        self.register_buffer("_device_anchor", torch.empty(0))
+
+    @property
+    def device(self):
+        return self._device_anchor.device
 
     def encode(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
         raise NotImplementedError
 
     def decode(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
+        raise NotImplementedError
+
+    def sample(
+        self, latent_size: Union[int, Tuple[int, int], Sequence[int]], batch_size: int
+    ) -> Dict[str, Tensor]:
         raise NotImplementedError
 
     def sample_test(

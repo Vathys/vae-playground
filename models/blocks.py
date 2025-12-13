@@ -1,7 +1,11 @@
-from typing import Dict, Tuple
+from typing import Dict, List, NotRequired, Optional, Tuple, TypedDict, TypeVar, Union
 
 import torch.nn as nn
 from torch import Tensor
+
+T = TypeVar("T")
+
+MList = Union[T, List[T]]
 
 
 class Identity(nn.Module):
@@ -255,6 +259,7 @@ class ConvBlock(nn.Module):
     def __init__(
         self,
         dim,
+        kernel_size,
         bottleneck,
         weight_norm,
         transpose=False,
@@ -289,9 +294,9 @@ class ConvBlock(nn.Module):
                 Block(
                     dim,
                     dim,
-                    (3, 3),
+                    (kernel_size, kernel_size),
                     stride=1,
-                    padding=1,
+                    padding=kernel_size // 2,
                     bias=False,
                     weight_norm=weight_norm,
                     scale=False,
@@ -316,9 +321,9 @@ class ConvBlock(nn.Module):
                 Block(
                     dim,
                     dim,
-                    (3, 3),
+                    (kernel_size, kernel_size),
                     stride=1,
-                    padding=1,
+                    padding=kernel_size // 2,
                     bias=False,
                     weight_norm=weight_norm,
                     scale=False,
@@ -329,9 +334,9 @@ class ConvBlock(nn.Module):
                 Block(
                     dim,
                     dim,
-                    (3, 3),
+                    (kernel_size, kernel_size),
                     stride=1,
-                    padding=1,
+                    padding=kernel_size // 2,
                     bias=True,
                     weight_norm=weight_norm,
                     scale=True,
@@ -364,27 +369,27 @@ class ResidualConvBlock(ConvBlock):
         return x + self.block(x)
 
 
-class EncoderScale(nn.Module):
+class ScaleBlock(nn.Module):
     def __init__(
         self,
         blocks: Dict[str, nn.Module],
-        down: Block,
-        cond_dim: int = None,
-        mix_type: str = "film",
+        scaling: Block,
+        cond_dim: Optional[int],
+        mix_type: str,
     ):
         super().__init__()
         self.blocks = nn.ModuleDict(blocks)
-        self.down = down
+        self.scaling = scaling
 
         if cond_dim is not None:
             if mix_type == "film":
-                self.mix_block = FiLM(cond_dim, self.down.out_channels)
+                self.mix_block = FiLM(cond_dim, self.scaling.out_channels)
             elif mix_type == "adain":
-                self.mix_block = AdaIN(cond_dim, self.down.out_channels)
+                self.mix_block = AdaIN(cond_dim, self.scaling.out_channels)
             elif mix_type == "norm_film":
-                self.mix_block = NormalizedFiLM(cond_dim, self.down.out_channels)
+                self.mix_block = NormalizedFiLM(cond_dim, self.scaling.out_channels)
             elif mix_type == "attention":
-                self.mix_block = Attention(cond_dim, self.down.out_channels)
+                self.mix_block = Attention(cond_dim, self.scaling.out_channels)
             else:
                 raise ValueError(f"mix_type {mix_type} not available...")
         else:
@@ -394,228 +399,247 @@ class EncoderScale(nn.Module):
         for _, b in self.blocks.items():
             x = b(x)
 
-        x = self.down(x)
+        x = self.scaling(x)
         if self.mix_block is not None and cond is not None:
             x = self.mix_block(x, cond)
 
         return x
 
 
-class DecoderScale(nn.Module):
-    def __init__(
-        self,
-        blocks: Dict[str, nn.Module],
-        up: Block,
-        cond_dim: int = None,
-        mix_type: str = "film",
-    ):
-        super().__init__()
-        self.blocks = nn.ModuleDict(blocks)
-        self.up = up
-
-        if cond_dim is not None:
-            if mix_type == "film":
-                self.mix_block = FiLM(cond_dim, self.up.out_channels)
-            elif mix_type == "adain":
-                self.mix_block = AdaIN(cond_dim, self.up.out_channels)
-            elif mix_type == "norm_film":
-                self.mix_block = NormalizedFiLM(cond_dim, self.up.out_channels)
-            elif mix_type == "attention":
-                self.mix_block = Attention(cond_dim, self.up.out_channels)
-            else:
-                raise ValueError(f"mix_type {mix_type} not available...")
-        else:
-            self.mix_block = None
-
-    def forward(self, x, cond=None):
-        for _, b in self.blocks.items():
-            x = b(x)
-
-        x = self.up(x)
-        if self.mix_block is not None and cond is not None:
-            x = self.mix_block(x, cond)
-
-        return x
+class NetworkConfig(TypedDict, total=True):
+    in_channels: int
+    base_dim: NotRequired[int]
+    out_dim: NotRequired[int]
+    scales: Union[int, List[float]]
+    num_blocks: Union[int, List[int]]
+    channel_multiplier: NotRequired[float]
+    norm: str
+    activation: str
+    transpose: bool
+    kernel_size: NotRequired[int]
+    residual: Union[bool, List[bool]]
+    bottleneck: Union[bool, List[bool]]
+    weight_norm: Union[bool, List[bool]]
+    final_activation: NotRequired[str]
+    cond_dim: NotRequired[int]
+    mix_type: NotRequired[str]
 
 
-def build_encoder(cfg: dict) -> Tuple[nn.Module, int]:
-    """Builds an encoder that successively scales down via convolutions.
+def build_network(cfg: NetworkConfig) -> Tuple[nn.Module, int]:
+    """Build a convolutional network with successive scaling.
 
-    :param cfg: Encoder config
+    :param cfg: Network configuration:
 
     Config includes:
-        - in_channels: number of input channels
-        - base_dim: starting dimension for scaling
-        - scales: number of times to scale the image
-        - num_blocks: number of convolution blocks per scale
-        - residual: boolean indicating whether to make blocks residual.
-        - channel_multiplier: multiplier to increase channels per scale.
-        - bottleneck: whether scale block should include a bottleneck
-        - weight_norm: whether to normalize weights
-        - norm: normalization block to use
-        - activation: activation to use
-        - cond_dim: dimension of conditioning vector (default: None)
-        - mix_type: type of mixing to apply to conditioning (default: film)
+        - in_channels (int; required): number of input channels.
+        - base_dim (int; optional): starting dimension for scaling
+          if not included, then no block is applied and in_channels
+          is used as base_dim.
+        - out_dim (int; optional): ending dimension; if not included,
+          then no block is applied.
+        - scales (int, list(float); required): number of times to scale
+          the image; if int, then scale number of times by channel_multiplier
+        - num_blocks (int, list(int); required): number of convolution blocks
+          per scale; if int, then same number of blocks are applied per scale
+        - channel_multiplier (float, optional): if scales is not list, then
+          use this number to scale channels
+        - norm (string, list(string); required): type of normalization block;
+          if list, then normalization is determined per scale
+        - activation (string, list(string); required): type of activation; if
+          list, then activation is determined per scale
+        - transpose(bool; required): whether to apply transpose convolutions
+        - kernel_size (int; optional): default kernel size for non-bottleneck
+          convolutions (default: 3)
+        - residual (bool, list(bool); optional): whether to make block residual;
+          if list, then determined per scale
+        - bottleneck (bool, list(bool); optional): whether to add convolutional
+          bottleneck in a block; if list, then bottleneck is determined per scale
+        - weight_norm (bool, list(bool); optional): whether to normalize weights;
+          if list, then weight norm is determined per scale
+        - final_activation (string; optional): activation to use in final
+          convolution; if none given, then default is standard activation; if out
+          channels is not given, then ignored (default: none)
+        - upscale_out (bool; optional): apply predictive upscaling in out block
+          (default: false)
+        - cond_dim (int, optional): dimension of conditional vector
+        - mix_type (string, optional): how to mix conditional vector into network
+          (default: adain)
 
-    :type cfg: dict
-    :return: Tuple with encoder, output dimension and output size
-    :rtype: Tuple[Module, int, int]
+    :type cfg: Dict[str, Optional[Any]]
+    :return: Network and out dimension
+    :rtype: Tuple[Module, int]
     """
-    BlockType = ResidualConvBlock if cfg["residual"] else ConvBlock
-    cond_dim = cfg.get("cond_dim", None)
-    mix_type = cfg.get("mix_type", "film")
 
-    in_block = Block(
-        cfg["in_channels"],
-        cfg["base_dim"],
-        (3, 3),
-        stride=1,
-        padding=1,
-        bias=True,
-        weight_norm=cfg["weight_norm"],
-        scale=True,
-        norm=cfg["norm"],
-        activation=cfg["activation"],
-    )
+    def by_scale(val: Union[T, List[T]], num: int) -> List[T]:
+        if isinstance(val, List):
+            assert len(val) == num
+            return val
+        else:
+            return [val] * num
+
+    cond_dim = cfg.get("cond_dim", None)
+    mix_type = cfg.get("mix_type", "adain")
+
+    in_channels = cfg["in_channels"]
+    base_dim = cfg.get("base_dim", None)
+    out_dim = cfg.get("out_dim", None)
+    ksize = cfg.get("kernel_size", 3)
+    assert ksize % 2 == 1
+
+    if isinstance(cfg["scales"], int):
+        assert "channel_multiplier" in cfg
+        scale_list = [cfg["channel_multiplier"]] * cfg["scales"]
+    else:
+        scale_list = cfg["scales"]
+
+    num_scales = len(scale_list)
+
+    num_blocks = by_scale(cfg["num_blocks"], num_scales)
+    norm = by_scale(cfg["norm"], num_scales)
+    activation = by_scale(cfg["activation"], num_scales)
+    transpose = cfg["transpose"]
+
+    residual = cfg.get("residual", False)
+    residual = by_scale(residual, num_scales)
+
+    bottleneck = cfg.get("bottleneck", False)
+    bottleneck = by_scale(bottleneck, num_scales)
+
+    weight_norm = cfg.get("weight_norm", False)
+    weight_norm = by_scale(weight_norm, num_scales)
+
+    upscale_out = cfg.get("upscale_out", False)
+    final_activation = cfg.get("final_activation", "none")
+
+    if base_dim is not None:
+        in_block = Block(
+            in_channels,
+            base_dim,
+            (ksize, ksize),
+            stride=1,
+            padding=ksize // 2,
+            bias=True,
+            weight_norm=weight_norm[0],
+            scale=True,
+            norm=norm[0],
+            activation=activation[0],
+            transpose=False,
+        )
+        dim = base_dim
+    else:
+        in_block = None
+        dim = in_channels
 
     scales = nn.ModuleDict()
-    dim = cfg["base_dim"]
 
-    for i in range(cfg["scales"]):
+    for i, scale in enumerate(scale_list):
         blocks = {}
-        for j in range(cfg["num_blocks"]):
-            blocks[f"scale_{i}_block_{j}"] = BlockType(
+        BlockType = ResidualConvBlock if residual[i] else ConvBlock
+        block_norm = norm[i]
+        block_act = activation[i]
+        block_bn = bottleneck[i]
+        block_wn = weight_norm[i]
+
+        for j in range(num_blocks[i]):
+            blocks[f"block{j}"] = BlockType(
                 dim,
-                bottleneck=cfg["bottleneck"],
-                weight_norm=cfg["weight_norm"],
-                norm=cfg["norm"],
-                activation=cfg["activation"],
+                kernel_size=ksize,
+                bottleneck=block_bn,
+                weight_norm=block_wn,
+                norm=block_norm,
+                activation=block_act,
+                transpose=transpose,
             )
 
-        out_dim = int(dim * cfg["channel_multiplier"])
-        down = Block(
+        ndim = int(dim * scale)
+        scaling = Block(
+            dim,
+            ndim,
+            (ksize, ksize),
+            stride=2,
+            padding=ksize // 2,
+            output_padding=1 if transpose else 0,
+            bias=True,
+            weight_norm=block_wn,
+            scale=True,
+            norm=block_norm,
+            activation=block_act,
+            transpose=transpose,
+        )
+        scales[f"scale_{i}"] = ScaleBlock(blocks, scaling, cond_dim, mix_type)
+        dim = ndim
+
+    out_blocks = []
+
+    if upscale_out:
+        block_up = Block(
+            dim,
+            dim,
+            kernel_size=(ksize, ksize),
+            stride=2,
+            padding=ksize // 2,
+            output_padding=1,
+            bias=True,
+            weight_norm=weight_norm[-1],
+            scale=False,
+            norm=norm[-1],
+            activation=activation[-1],
+            transpose=True,
+        )
+        block_down = Block(
+            dim,
+            dim,
+            kernel_size=(ksize, ksize),
+            stride=2,
+            padding=ksize // 2,
+            bias=True,
+            weight_norm=weight_norm[-1],
+            scale=True,
+            norm=norm[-1],
+            activation=activation[-1],
+            transpose=False,
+        )
+        out_blocks.append(block_up)
+        out_blocks.append(block_down)
+
+    if out_dim is not None:
+        out_block = Block(
             dim,
             out_dim,
-            (3, 3),
-            stride=2,
-            padding=1,
+            (ksize, ksize),
+            stride=1,
+            padding=ksize // 2,
             bias=True,
-            weight_norm=cfg["weight_norm"],
+            weight_norm=weight_norm[-1],
             scale=True,
-            norm=cfg["norm"],
-            activation=cfg["activation"],
+            norm="none",
+            activation=final_activation,
         )
-        scales[f"scale_{i}"] = EncoderScale(blocks, down, cond_dim, mix_type)
         dim = out_dim
+        out_blocks.append(out_block)
 
-    class Encoder(nn.Module):
+    if len(out_blocks) > 0:
+        out_block = nn.Sequential(*out_blocks)
+    else:
+        out_block = None
+
+    class Network(nn.Module):
         def __init__(self):
             super().__init__()
             self.in_block = in_block
             self.scales = scales
-
-        def forward(self, x, cond=None):
-            x = self.in_block(x)
-            for _, s in self.scales.items():
-                x = s(x, cond)
-            return x
-
-    return Encoder(), dim
-
-
-def build_decoder(cfg: dict) -> Tuple[nn.Module, int]:
-    """Builds a decoder that successively scales up via convolutions.
-
-    :param cfg: Decoder config:
-
-    Config includes:
-        - in_channels: number of input channels
-        - out_channels: number of output channels;
-          if none, then no final block is applied
-        - scales: number of times to scale the image
-        - num_blocks: number of convolution blocks per scale
-        - residual: boolean indicating whether to make blocks residual.
-        - channel_multiplier: multiplier to increase channels per scale.
-        - bottleneck: whether scale block should include a bottleneck
-        - weight_norm: whether to normalize weights
-        - norm: normalization block to use
-        - activation: activation to use
-        - final_activation: activation to use in the final convolution.
-        - cond_dim: dimension of conditioning vector (default: None)
-        - mix_type: type of mixing to apply to conditioning (default: film)
-
-    :type cfg: dict
-    :return: Tuple with decoder, output dimension and output size
-    :rtype: Tuple[Module, int, int]
-    """
-    BlockType = ResidualConvBlock if cfg["residual"] else ConvBlock
-    cond_dim = cfg.get("cond_dim", None)
-    mix_type = cfg.get("mix_type", "film")
-
-    dim = cfg["in_channels"]
-
-    scales = nn.ModuleDict()
-
-    for i in reversed(range(cfg["scales"])):
-        blocks = {}
-        for j in range(cfg["num_blocks"]):
-            blocks[f"scale_{i}_block_{j}"] = BlockType(
-                dim,
-                bottleneck=cfg["bottleneck"],
-                weight_norm=cfg["weight_norm"],
-                transpose=True,
-                norm=cfg["norm"],
-                activation=cfg["activation"],
-            )
-
-        out_dim = int(dim * cfg["channel_multiplier"])
-        up = Block(
-            dim,
-            out_dim,
-            (3, 3),
-            stride=2,
-            padding=1,
-            output_padding=1,
-            bias=True,
-            weight_norm=cfg["weight_norm"],
-            scale=True,
-            transpose=True,
-            norm=cfg["norm"],
-            activation=cfg["activation"],
-        )
-        scales[f"scale_{i}"] = DecoderScale(blocks, up, cond_dim, mix_type)
-
-        dim = out_dim
-
-    if cfg["out_channels"] is not None:
-        out_block = Block(
-            dim,
-            cfg["out_channels"],
-            (3, 3),
-            stride=1,
-            padding=1,
-            bias=True,
-            weight_norm=cfg["weight_norm"],
-            scale=True,
-            norm="none",
-            activation=cfg["final_activation"],
-        )
-        dim = cfg["out_channels"]
-    else:
-        out_block = None
-
-    class Decoder(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.scales = scales
             self.out_block = out_block
 
         def forward(self, x, cond=None):
+            if self.in_block is not None:
+                x = self.in_block(x)
+
             for _, s in self.scales.items():
                 x = s(x, cond)
-            if self.out_block:
+
+            if self.out_block is not None:
                 x = self.out_block(x)
 
             return x
 
-    return Decoder(), dim
+    return Network(), dim

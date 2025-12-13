@@ -6,7 +6,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from models.base import BaseVAE
-from models.blocks import build_decoder, build_encoder
+from models.blocks import build_network
 from utils import lerp_z
 
 
@@ -28,22 +28,19 @@ class BetaVAE(BaseVAE):
             self.gamma is not None and self.C_max is not None
         )
 
-        self.encoder, self.enc_out_dim = build_encoder(enc_cfg)
+        self.encoder, self.enc_out_dim = build_network(enc_cfg)
 
         self.fc_mu = nn.Conv2d(
-            self.enc_out_dim, self.latent_dim, kernel_size=1, stride=1
+            self.enc_out_dim, self.latent_dim, kernel_size=3, stride=1, padding=1
         )
         self.fc_var = nn.Conv2d(
-            self.enc_out_dim, self.latent_dim, kernel_size=1, stride=1
+            self.enc_out_dim, self.latent_dim, kernel_size=3, stride=1, padding=1
         )
 
-        self.project = nn.Conv2d(
-            self.latent_dim, self.enc_out_dim, kernel_size=1, stride=1
-        )
+        dec_cfg["in_channels"] = self.latent_dim
+        dec_cfg["base_dim"] = self.enc_out_dim
 
-        dec_cfg["in_channels"] = self.enc_out_dim
-
-        self.decoder, _ = build_decoder(dec_cfg)
+        self.decoder, self.dec_out_dim = build_network(dec_cfg)
 
     def encode(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
         x = data["input"]
@@ -56,9 +53,25 @@ class BetaVAE(BaseVAE):
 
     def decode(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
         z = data["z"]
-        x = self.project(z)
-        x = self.decoder(x)
+        x = self.decoder(z)
         return {"output": x}
+
+    def sample(
+        self, latent_size: Union[int, Tuple[int, int], Sequence[int]], batch_size: int
+    ):
+        if isinstance(latent_size, int):
+            latent_size = (latent_size, latent_size)
+        elif isinstance(latent_size, tuple):
+            latent_size = latent_size
+        else:
+            assert len(latent_size) >= 2
+            latent_size = latent_size[:2]
+
+        latents = torch.randn(
+            batch_size, self.latent_dim, *latent_size, device=self.device
+        )
+
+        return {"z": latents, "latent_size": latent_size}
 
     def reparametrize(self, mu: Tensor, log_var: Tensor) -> Tensor:
         std = torch.exp(0.5 * log_var)
@@ -138,22 +151,16 @@ class BetaVAE(BaseVAE):
         inter: int = 5,
         batch_size: int = 1,
     ):
-        device = next(self.parameters()).device
-        if isinstance(latent_size, int):
-            latent_size = (latent_size, latent_size)
-        elif isinstance(latent_size, tuple):
-            latent_size = latent_size
-        else:
-            assert len(latent_size) >= 2
-            latent_size = latent_size[:2]
+        samples = self.sample(latent_size, num * 2)
 
-        anchors = torch.randn(num * 2, self.latent_dim, *latent_size, device=device)
+        anchors = samples["z"]
+        latent_size = samples["latent_size"]
 
         pairs = anchors.view(num, 2, self.latent_dim, *latent_size)
 
         all_interps = []
 
-        t_vals = torch.linspace(0, 1, inter, device=device)
+        t_vals = torch.linspace(0, 1, inter, device=self.device)
 
         for i in range(num):
             z1, z2 = pairs[i]

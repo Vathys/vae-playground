@@ -1,14 +1,21 @@
+from typing import Dict
+
 import lightning as L
 import torch
 import torchvision.utils as vutils
 from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 from torch import Tensor, optim
+from torchmetrics.image.fid import FrechetInceptionDistance as FID
+from torchmetrics.image.inception import InceptionScore
+from torchmetrics.image.kid import KernelInceptionDistance as KID
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity as LPIPS
+from torchmetrics.image.psnr import PeakSignalNoiseRatio as PSNR
+from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure as SSIM
 
 from models import getVAE
 
 
 class VAEExperiment(L.LightningModule):
-
     def __init__(self, model_params, experiment_params) -> None:
         super().__init__()
 
@@ -18,15 +25,54 @@ class VAEExperiment(L.LightningModule):
         self.test_input = None
         self.test_latents = None
 
+        # Validation Models
+
+        # Reconstruction Metrics
+        if "lpips" in experiment_params["metrics"]:
+            self.lpips = LPIPS(net_type="vgg").eval()
+        else:
+            self.lpips = None
+        if "ssim" in experiment_params["metrics"]:
+            self.ssim = SSIM(data_range=1.0).eval()
+        else:
+            self.ssim = None
+        if "psnr" in experiment_params["metrics"]:
+            self.psnr = PSNR(data_range=1.0).eval()
+        else:
+            self.psnr = None
+
+        # Generation Metrics
+        if "fid" in experiment_params["metrics"]:
+            self.fid = FID(feature=2048, normalize=True).eval()
+        else:
+            self.fid = None
+        if "kid" in experiment_params["metrics"]:
+            self.kid = KID(feature=2048, subset_size=50, normalize=True).eval()
+        else:
+            self.kid = None
+        if "inception_score" in experiment_params["metrics"]:
+            self.inception = InceptionScore(feature=2048, normalize=True).eval()
+        else:
+            self.inception = None
+
         self.save_hyperparameters()
 
-    def forward(self, data) -> Tensor:
+    def state_dict(self):
+        state_dict = self.model.state_dict()
+        return {f"model.{key}": val for key, val in state_dict.items()}
+
+    def on_train_start(self):
+        self.model.to(self.device)
+
+    def forward(self, data) -> Dict[str, Tensor]:
         return self.model(data)
 
     def training_step(self, batch, batch_idx):
         results = self.forward(batch)
+
         results["global_step"] = self.global_step
         results["current_epoch"] = self.current_epoch
+
         train_loss = self.model.loss_function(results)
 
         self.log_dict(
@@ -41,19 +87,65 @@ class VAEExperiment(L.LightningModule):
             self.log_grads()
 
     def validation_step(self, batch, batch_idx):
-        if self.test_input is None or self.test_latents is None:
-            self.initialize_image_inputs(batch)
+        if self.test_input is None:
+            self.test_input = {"input": batch["input"][:36]}
+
+        if self.test_latents is None:
+            self.test_latents = [
+                self.model.sample_test(self.params["test_latent_size"], 6, 6, 36)
+            ]
 
         results = self.forward(batch)
+
         results["global_step"] = self.global_step
         results["current_epoch"] = self.current_epoch
+
         val_loss = self.model.loss_function(results)
 
         self.log_dict(
             {f"val/{key}": val.item() for key, val in val_loss.items()}, sync_dist=True
         )
 
+        x = results["input"]
+        x_hat = results["output"]
+
+        if self.ssim is not None:
+            self.log("val/metrics/ssim", self.ssim(x_hat, x), sync_dist=True)
+        if self.lpips is not None:
+            self.log("val/metrics/lpips", self.lpips(x_hat, x), sync_dist=True)
+        if self.psnr is not None:
+            self.log("val/metrics/psnr", self.psnr(x_hat, x), sync_dist=True)
+
+        if self.fid is not None:
+            self.fid.update(x, real=True)
+            self.fid.update(x_hat, real=False)
+
+        if self.kid is not None:
+            self.kid.update(x, real=True)
+            self.kid.update(x_hat, real=False)
+
+        if self.inception is not None:
+            self.inception.update(x_hat)
+
         return val_loss
+
+    def on_validation_epoch_end(self):
+        if self.fid is not None:
+            fid_val = self.fid.compute()
+            self.log("val/metrics/fid", fid_val, sync_dist=True)
+            self.fid.reset()
+
+        if self.kid is not None:
+            kid_mean, kid_std = self.kid.compute()
+            self.log("val/metrics/kid_mean", kid_mean, sync_dist=True)
+            self.log("val/metrics/kid_std", kid_std, sync_dist=True)
+            self.kid.reset()
+
+        if self.inception is not None:
+            is_mean, is_std = self.inception.compute()
+            self.log("val/metrics/inception_score_mean", is_mean, sync_dist=True)
+            self.log("val/metrics/inception_score_std", is_std, sync_dist=True)
+            self.inception.reset()
 
     def on_validation_end(self) -> None:
         self.sample_images()
@@ -73,19 +165,9 @@ class VAEExperiment(L.LightningModule):
 
         self.logger.experiment.add_text("grad/summary", grad_txt, self.global_step)
 
-    def initialize_image_inputs(self, batch):
-        if self.test_input is None:
-            self.test_input = {"input": batch["input"][:25]}
-
-        if self.test_latents is None:
-            z1 = self.model.sample_test(self.params["test_latent_size"], 5, 5, 25)
-            z = self.model.sample_test(5, 5, 25)
-
-            self.test_latents = [z1]
-
     def sample_images(self):
         output = self.model.forward(self.test_input)["output"]
-        grid = vutils.make_grid(output, nrow=5)
+        grid = vutils.make_grid(output, nrow=6)
         self.logger.experiment.add_image("reconstruction", grid, self.global_step)
 
         for i, tests in enumerate(self.test_latents):
@@ -95,7 +177,7 @@ class VAEExperiment(L.LightningModule):
                     result.append(self.model.decode(latent)["output"])
                 result = torch.cat(result, dim=0)
 
-                grid = vutils.make_grid(result, nrow=5)
+                grid = vutils.make_grid(result, nrow=6)
                 self.logger.experiment.add_image(f"samples {i}", grid, self.global_step)
             except Warning:
                 pass
