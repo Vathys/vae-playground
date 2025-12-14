@@ -1,11 +1,28 @@
 from typing import Dict, List, NotRequired, Optional, Tuple, TypedDict, TypeVar, Union
 
+import torch
 import torch.nn as nn
 from torch import Tensor
 
 T = TypeVar("T")
 
 MList = Union[T, List[T]]
+
+
+def make_coord_grid(h, w, device):
+    ys = torch.linspace(-1, 1, h, device=device)
+    xs = torch.linspace(-1, 1, w, device=device)
+    yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+    return torch.stack([xx, yy], dim=0)  # [2, H, W]
+
+
+def concat_coords(x):
+    B, _, H, W = x.shape
+
+    coords = make_coord_grid(H, W, x.device)
+    coords = coords.expand(B, 2, H, W)
+
+    return torch.cat([coords, x], dim=1)
 
 
 class Identity(nn.Module):
@@ -265,6 +282,7 @@ class ConvBlock(nn.Module):
         transpose=False,
         norm="batch",
         activation="leaky_relu",
+        add_coord_channel=False,
     ):
         """Initializes a Standard Block.
 
@@ -276,10 +294,17 @@ class ConvBlock(nn.Module):
         """
         super().__init__()
 
+        self.add_coord_channel = add_coord_channel
+
+        if add_coord_channel:
+            indim = dim + 2
+        else:
+            indim = dim
+
         if bottleneck:
             self.block = nn.Sequential(
                 Block(
-                    dim,
+                    indim,
                     dim,
                     (1, 1),
                     stride=1,
@@ -319,7 +344,7 @@ class ConvBlock(nn.Module):
         else:
             self.block = nn.Sequential(
                 Block(
-                    dim,
+                    indim,
                     dim,
                     (kernel_size, kernel_size),
                     stride=1,
@@ -354,6 +379,8 @@ class ConvBlock(nn.Module):
         Returns:
             transformed tensor.
         """
+        if self.add_coord_channel:
+            x = concat_coords(x)
         return self.block(x)
 
 
@@ -366,7 +393,11 @@ class ResidualConvBlock(ConvBlock):
         Returns:
             transformed tensor.
         """
-        return x + self.block(x)
+        if self.add_coord_channel:
+            nx = concat_coords(x)
+        else:
+            nx = x
+        return x + self.block(nx)
 
 
 class ScaleBlock(nn.Module):
@@ -423,6 +454,7 @@ class NetworkConfig(TypedDict, total=True):
     final_activation: NotRequired[str]
     cond_dim: NotRequired[int]
     mix_type: NotRequired[str]
+    add_coord_channel: NotRequired[bool]
 
 
 def build_network(cfg: NetworkConfig) -> Tuple[nn.Module, int]:
@@ -464,6 +496,8 @@ def build_network(cfg: NetworkConfig) -> Tuple[nn.Module, int]:
         - cond_dim (int, optional): dimension of conditional vector
         - mix_type (string, optional): how to mix conditional vector into network
           (default: adain)
+        - add_coord_channel (bool, optional): add a coord channel before scaling to help with
+          absolute positioning while scaling (default: false)
 
     :type cfg: Dict[str, Optional[Any]]
     :return: Network and out dimension
@@ -511,7 +545,12 @@ def build_network(cfg: NetworkConfig) -> Tuple[nn.Module, int]:
     upscale_out = cfg.get("upscale_out", False)
     final_activation = cfg.get("final_activation", "none")
 
+    add_coord_channel = cfg.get("add_coord_channel", False)
+
     if base_dim is not None:
+        if add_coord_channel:
+            in_channels += 2
+
         in_block = Block(
             in_channels,
             base_dim,
@@ -549,6 +588,7 @@ def build_network(cfg: NetworkConfig) -> Tuple[nn.Module, int]:
                 norm=block_norm,
                 activation=block_act,
                 transpose=transpose,
+                add_coord_channel=(j == 0 and add_coord_channel),
             )
 
         ndim = int(dim * scale)
@@ -566,14 +606,20 @@ def build_network(cfg: NetworkConfig) -> Tuple[nn.Module, int]:
             activation=block_act,
             transpose=transpose,
         )
-        scales[f"scale_{i}"] = ScaleBlock(blocks, scaling, cond_dim, mix_type)
+        scales[f"scale_{i}"] = ScaleBlock(
+            blocks=blocks, scaling=scaling, cond_dim=cond_dim, mix_type=mix_type
+        )
         dim = ndim
 
     out_blocks = []
 
     if upscale_out:
+        if add_coord_channel:
+            out_indim = dim + 2
+        else:
+            out_indim = dim
         block_up = Block(
-            dim,
+            out_indim,
             dim,
             kernel_size=(ksize, ksize),
             stride=2,
@@ -632,12 +678,18 @@ def build_network(cfg: NetworkConfig) -> Tuple[nn.Module, int]:
 
         def forward(self, x, cond=None):
             if self.in_block is not None:
+                if add_coord_channel:
+                    x = concat_coords(x)
+
                 x = self.in_block(x)
 
             for _, s in self.scales.items():
                 x = s(x, cond)
 
             if self.out_block is not None:
+                if add_coord_channel:
+                    x = concat_coords(x)
+
                 x = self.out_block(x)
 
             return x
