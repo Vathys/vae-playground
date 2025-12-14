@@ -1,4 +1,5 @@
 from typing import Dict
+from collections import Counter
 
 import lightning as L
 import torch
@@ -24,6 +25,9 @@ class VAEExperiment(L.LightningModule):
 
         self.test_input = None
         self.test_latents = None
+
+        self.train_batch_resolutions = []
+        self.val_batch_resolutions = []
 
         # Validation Models
 
@@ -68,6 +72,12 @@ class VAEExperiment(L.LightningModule):
         return self.model(data)
 
     def training_step(self, batch, batch_idx):
+        _, _, H, W = batch["input"].shape
+        if H > W:
+            self.train_batch_resolutions.append(H)
+        else:
+            self.train_batch_resolutions.append(W)
+
         results = self.forward(batch)
 
         results["global_step"] = self.global_step
@@ -86,13 +96,37 @@ class VAEExperiment(L.LightningModule):
         if batch_idx == 0:
             self.log_grads()
 
+    def on_train_epoch_end(self):
+        res_tensor = torch.tensor(
+            self.train_batch_resolutions, dtype=torch.int, device=self.device
+        )
+
+        self.logger.experiment.add_histogram(
+            "train/batch_resolutions", res_tensor, self.global_step
+        )
+
+        count = Counter(res_tensor.tolist())
+
+        self.logger.experiment.add_text(
+            "train/batch_resolutions", str(dict(count)), self.global_step
+        )
+
+        self.train_batch_resolutions.clear()
+
     def validation_step(self, batch, batch_idx):
+        _, _, H, W = batch["input"].shape
+        if H > W:
+            self.val_batch_resolutions.append(H)
+        else:
+            self.val_batch_resolutions.append(W)
+
         if self.test_input is None:
             self.test_input = {"input": batch["input"][:36]}
 
         if self.test_latents is None:
             self.test_latents = [
-                self.model.sample_test(self.params["test_latent_size"], 6, 6, 36)
+                self.model.sample_test(test_latent_size, 6, 6, 36)
+                for test_latent_size in self.params["test_latent_sizes"]
             ]
 
         results = self.forward(batch)
@@ -147,6 +181,22 @@ class VAEExperiment(L.LightningModule):
             self.log("val/metrics/inception_score_std", is_std, sync_dist=True)
             self.inception.reset()
 
+        res_tensor = torch.tensor(
+            self.val_batch_resolutions, dtype=torch.int, device=self.device
+        )
+
+        self.logger.experiment.add_histogram(
+            "val/batch_resolutions", res_tensor, self.global_step
+        )
+
+        count = Counter(res_tensor.tolist())
+
+        self.logger.experiment.add_text(
+            "val/batch_resolutions", str(dict(count)), self.global_step
+        )
+
+        self.val_batch_resolutions.clear()
+
     def on_validation_end(self) -> None:
         self.sample_images()
 
@@ -163,7 +213,7 @@ class VAEExperiment(L.LightningModule):
                 norm = torch.norm(param.grad.detach(), 2)
                 grad_txt += f"{name} {norm.item():.3f}  \n"
 
-        self.logger.experiment.add_text("grad/summary", grad_txt, self.global_step)
+        # self.logger.experiment.add_text("grad/summary", grad_txt, self.global_step)
 
     def sample_images(self):
         output = self.model.forward(self.test_input)["output"]

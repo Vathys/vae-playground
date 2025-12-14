@@ -35,7 +35,7 @@ tb_logger = TensorBoardLogger(
 )
 
 # For reproducibility
-seed_everything(config["experiment_params"]["manual_seed"], True)
+global_seed = seed_everything(config["experiment_params"]["manual_seed"], False)
 
 torch.set_float32_matmul_precision("high")
 torch.backends.cudnn.deterministic = True
@@ -43,7 +43,7 @@ torch.backends.cudnn.benchmark = False
 
 experiment = VAEExperiment(config["model_params"], config["experiment_params"])
 
-data = VAEDataset(**config["data_params"])
+data = VAEDataset(**config["data_params"], seed=global_seed)
 data.setup()
 
 runner = Trainer(
