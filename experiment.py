@@ -1,5 +1,5 @@
-from typing import Dict
 from collections import Counter
+from typing import Dict
 
 import lightning as L
 import torch
@@ -24,10 +24,11 @@ class VAEExperiment(L.LightningModule):
         self.params = experiment_params
 
         self.test_input = None
-        self.test_latents = None
 
         self.train_batch_resolutions = []
         self.val_batch_resolutions = []
+
+        self.val_cond_norms = []
 
         # Validation Models
 
@@ -123,12 +124,6 @@ class VAEExperiment(L.LightningModule):
         if self.test_input is None:
             self.test_input = {"input": batch["input"][:36]}
 
-        if self.test_latents is None:
-            self.test_latents = [
-                self.model.sample_test(test_latent_size, 6, 6, 36)
-                for test_latent_size in self.params["test_latent_sizes"]
-            ]
-
         results = self.forward(batch)
 
         results["global_step"] = self.global_step
@@ -139,6 +134,10 @@ class VAEExperiment(L.LightningModule):
         self.log_dict(
             {f"val/{key}": val.item() for key, val in val_loss.items()}, sync_dist=True
         )
+
+        if "cond" in results:
+            cond_norms = results["cond"].norm(dim=1)
+            self.val_cond_norms.extend(cond_norms.tolist())
 
         x = results["input"]
         x_hat = results["output"]
@@ -197,6 +196,15 @@ class VAEExperiment(L.LightningModule):
 
         self.val_batch_resolutions.clear()
 
+        if len(self.val_cond_norms) > 0:
+            cond_tensor = torch.tensor(self.val_cond_norms, device=self.device)
+
+            self.logger.experiment.add_histogram(
+                "val/cond_norms", cond_tensor, self.global_step
+            )
+
+            self.val_cond_norms.clear()
+
     def on_validation_end(self) -> None:
         self.sample_images()
 
@@ -220,17 +228,21 @@ class VAEExperiment(L.LightningModule):
         grid = vutils.make_grid(output, nrow=6)
         self.logger.experiment.add_image("reconstruction", grid, self.global_step)
 
-        for i, tests in enumerate(self.test_latents):
-            try:
-                result = []
-                for latent in tests:
-                    result.append(self.model.decode(latent)["output"])
-                result = torch.cat(result, dim=0)
+        anchors_a = {"input": self.test_input["input"][:6, ...]}
+        anchors_b = {"input": self.test_input["input"][6:12, ...]}
 
-                grid = vutils.make_grid(result, nrow=6)
-                self.logger.experiment.add_image(f"samples {i}", grid, self.global_step)
-            except Warning:
-                pass
+        encoded_a = self.model.encode(anchors_a)
+        encoded_b = self.model.encode(anchors_b)
+
+        interp_list = self.model.interpolate(
+            encoded_a, encoded_b, steps=6, batch_size=6 * 6
+        )
+
+        for i, interp in enumerate(interp_list):
+            grid = vutils.make_grid(interp["output"], nrow=6)
+            self.logger.experiment.add_image(
+                f"interpolated {i}", grid, self.global_step
+            )
 
     def configure_optimizers(self):
         optims = []

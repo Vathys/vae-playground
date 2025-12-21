@@ -1,6 +1,14 @@
 model_params:
-  name: "VanillaVAE"
+  name: "SigmaVAE"
   latent_dim: 4
+  residual_type: sech
+  variant: learn
+  anneal_stop_epoch: 60
+  logsigma_start: 0
+  logsigma_end: -2.5
+  C_type: learn
+  gamma: 10
+  max_capacity: 50
   encoder:
     in_channels: 3
     base_dim: 8
@@ -47,8 +55,6 @@ experiment_params:
     eta_min: 0.00005
   manual_seed: 1265
   max_epochs: 100
-  test_latent_sizes:
-    - [4, 4]
   metrics: ["lpips", "ssim", "psnr", "fid"]
 
 trainer_params:
@@ -57,7 +63,8 @@ trainer_params:
   precision: "32-true"
   gradient_clip_val: 5.0
   gradient_clip_algorithm: norm
+  max_epochs: 100
 
 logging_params:
   save_dir: "logs/"
-  name: "VanillaVAE"
+  name: "SigmaVAE"

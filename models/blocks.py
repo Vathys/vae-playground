@@ -1,4 +1,4 @@
-from typing import Dict, List, NotRequired, Optional, Tuple, TypedDict, TypeVar, Union
+from typing import List, NotRequired, Tuple, TypedDict, TypeVar, Union
 
 import torch
 import torch.nn as nn
@@ -31,100 +31,109 @@ class Identity(nn.Module):
 
 
 class AdaIN(nn.Module):
-    def __init__(self, cond_dim, num_channels):
+    def __init__(self, in_dim, cond_dim):
         super().__init__()
 
+        self.style_net = nn.Linear(cond_dim, in_dim * 2)
+
+    @staticmethod
+    def _calc_stats(x: Tensor) -> Tuple[Tensor, Tensor]:
+        eps = 1e-6
+
+        mean = x.mean(dim=[2, 3], keepdim=True)
+        var = x.var(dim=[2, 3], unbiased=False, keepdim=True)
+        std = torch.sqrt(var + eps)
+
+        return mean, std
+
     def forward(self, x: Tensor, cond: Tensor):
-        def _get_mean_std(a):
-            a = a.flatten(start_dim=1)
-            return (
-                a.mean(dim=1, keepdim=True)[..., None, None],
-                a.std(dim=1, keepdim=True)[..., None, None],
-            )
+        # x: [B, in_dim, H, W], cond: [B, cond_dim]
+        style = self.style_net(cond)[..., None, None]
+        gamma, beta = style.chunk(2, dim=1)
 
-        b, s = _get_mean_std(cond)
-        x_mean, x_std = _get_mean_std(x)
+        mu_x, sigma_x = self._calc_stats(x)
 
-        x = (x - x_mean) / x_std
+        x_norm = (x - mu_x) / sigma_x
 
-        x = x * s + b
-
-        return x
+        return (1 + gamma) * x_norm + beta
 
 
 class FiLM(nn.Module):
-    def __init__(self, cond_dim, num_channels):
+    def __init__(self, in_dim, cond_dim):
         super().__init__()
-        self.to_scale = nn.Linear(cond_dim, num_channels)
-        self.to_shift = nn.Linear(cond_dim, num_channels)
+        self.film_net = nn.Linear(cond_dim, in_dim * 2)
 
     def forward(self, x: Tensor, cond: Tensor):
-        s = self.to_scale(cond)[..., None, None]
-        b = self.to_shift(cond)[..., None, None]
+        # x: [B, in_dim, H, W], cond: [B, cond_dim]
+        style = self.film_net(cond)[..., None, None]
+        gamma, beta = style.chunk(2, dim=1)
 
-        return s * x + b
+        return (1 + gamma) * x + beta
 
 
-class NormalizedFiLM(nn.Module):
-    def __init__(self, cond_dim, num_channels):
+class StatisticPreservingAdaIN(nn.Module):
+    def __init__(self, in_dim, cond_dim):
         super().__init__()
-        self.to_scale = nn.Linear(cond_dim, num_channels)
-        self.to_shift = nn.Linear(cond_dim, num_channels)
+        self.in_dim = in_dim
+
+        self.style_net = nn.Linear(cond_dim, in_dim * 2)
+
+    @staticmethod
+    def _calc_stats(x: Tensor) -> Tuple[Tensor, Tensor]:
+        eps = 1e-6
+
+        mean = x.mean(dim=[2, 3], keepdim=True)
+        var = x.var(dim=[2, 3], unbiased=False, keepdim=True)
+        std = torch.sqrt(var + eps)
+
+        return mean, std
 
     def forward(self, x: Tensor, cond: Tensor):
-        def _get_mean_std(a):
-            a = a.flatten(start_dim=1)
-            return (
-                a.mean(dim=1, keepdim=True)[..., None, None],
-                a.std(dim=1, keepdim=True)[..., None, None],
-            )
+        # x: [B, in_dim, H, W], cond: [B, cond_dim]
+        mu_x, sigma_x = self._calc_stats(x)
 
-        x_mean, x_std = _get_mean_std(x)
+        style = self.style_net(cond)[..., None, None]
+        gamma_c, beta_c = style.chunk(2, dim=1)
 
-        s = self.to_scale(cond)[..., None, None]
-        b = self.to_shift(cond)[..., None, None]
+        x_norm = (x - mu_x) / sigma_x
 
-        x = s * x + b
+        x_prime = (1 + gamma_c) * x_norm + beta_c
 
-        n_x_mean, n_x_std = _get_mean_std(x)
+        mu_x_prime, sigma_x_prime = self._calc_stats(x_prime)
 
-        x = (x - n_x_mean) / (n_x_std + 1e-6)
-        x = x * x_std + x_mean
+        x_prime_norm = (x_prime - mu_x_prime) / sigma_x_prime
 
-        return x
+        return sigma_x * x_prime_norm + mu_x
 
 
-class Attention(nn.Module):
-    def __init__(self, cond_dim, num_channels, attn_dim=256, attn_heads=4):
+class CrossAttentionMix(nn.Module):
+    def __init__(self, in_dim, cond_dim):
         super().__init__()
+        C = in_dim // 8
 
-        self.q_proj = nn.Conv2d(num_channels, attn_dim, kernel_size=1)
+        self.query = nn.Conv2d(in_dim, C, 1)
+        self.key = nn.Linear(cond_dim, C)
+        self.value = nn.Linear(cond_dim, in_dim)
 
-        self.k_proj = nn.Linear(cond_dim, attn_dim)
-        self.v_proj = nn.Linear(cond_dim, attn_dim)
-
-        self.mha = nn.MultiheadAttention(
-            embed_dim=attn_dim, num_heads=attn_heads, batch_first=True
-        )
-
-        self.out_proj = nn.Conv2d(attn_dim, num_channels, kernel_size=1)
+        self.proj = nn.Conv2d(in_dim, in_dim, 1)
+        self.gamma = nn.Parameter(torch.ones(1))
 
     def forward(self, x: Tensor, cond: Tensor):
         B, C, H, W = x.shape
-        S = H * W
 
-        q = self.q_proj(x)
-        q = q.view(B, -1, S).permute(0, 2, 1)
+        q = (
+            self.query(x).flatten(start_dim=2).permute(0, 2, 1).contiguous()
+        )  # [B, HW, C']
+        k = self.key(cond).unsqueeze(1)  # [B, 1, C']
+        v = self.value(cond).unsqueeze(1)  # [B, 1, C]
 
-        k = self.k_proj(cond).unsqueeze(1)
-        v = self.v_proj(cond).unsqueeze(1)
+        attn = q @ k.permute(0, 2, 1)  # [B, HW, 1]
+        attn = attn.softmax(dim=1)
 
-        attn_out, _ = self.mha(query=q, key=k, value=v)
-        attn_out = attn_out.permute(0, 2, 1).view(B, -1, H, W)
+        out = attn @ v  # [B, HW, C]
+        out = out.permute(0, 2, 1).view(B, C, H, W).contiguous()
 
-        attn_out = self.out_proj(attn_out)
-
-        return x + attn_out
+        return x + self.gamma * self.proj(out)
 
 
 class WeightNormConv2d(nn.Module):
@@ -264,10 +273,19 @@ class Block(nn.Module):
         else:
             raise ValueError(f"activation {activation} not supported")
 
-    def forward(self, x):
-        x = self.conv(x)
-        x = self.norm_block(x)
-        x = self.activation_block(x)
+    def forward_conv(self, x):
+        return self.conv(x)
+
+    def forward_norm(self, x):
+        return self.norm_block(x)
+
+    def forward_act(self, x):
+        return self.activation_block(x)
+
+    def forward(self, x, **kwargs):
+        x = self.forward_conv(x)
+        x = self.forward_norm(x)
+        x = self.forward_act(x)
 
         return x
 
@@ -282,18 +300,14 @@ class ConvBlock(nn.Module):
         transpose=False,
         norm="batch",
         activation="leaky_relu",
+        residual=False,
         add_coord_channel=False,
+        **kwargs,
     ):
-        """Initializes a Standard Block.
-
-        Args:
-            dim: number of input and output features.
-            bottleneck: True if use bottleneck, False otherwise.
-            weight_norm: True if apply weight normalization, False otherwise.
-            transpose: True if transposed convolution, False otherwise.
-        """
         super().__init__()
 
+        self.residual = residual
+        self.bottleneck = bottleneck
         self.add_coord_channel = add_coord_channel
 
         if add_coord_channel:
@@ -302,139 +316,161 @@ class ConvBlock(nn.Module):
             indim = dim
 
         if bottleneck:
-            self.block = nn.Sequential(
-                Block(
-                    indim,
-                    dim,
-                    (1, 1),
-                    stride=1,
-                    padding=0,
-                    bias=False,
-                    weight_norm=weight_norm,
-                    scale=False,
-                    transpose=transpose,
-                    norm=norm,
-                    activation=activation,
-                ),
-                Block(
-                    dim,
-                    dim,
-                    (kernel_size, kernel_size),
-                    stride=1,
-                    padding=kernel_size // 2,
-                    bias=False,
-                    weight_norm=weight_norm,
-                    scale=False,
-                    transpose=transpose,
-                    norm=norm,
-                    activation=activation,
-                ),
-                Block(
-                    dim,
-                    dim,
-                    (1, 1),
-                    stride=1,
-                    padding=0,
-                    bias=True,
-                    weight_norm=weight_norm,
-                    scale=True,
-                    transpose=transpose,
-                ),
+            self.c1 = Block(
+                indim,
+                dim,
+                (1, 1),
+                stride=1,
+                padding=0,
+                bias=False,
+                weight_norm=weight_norm,
+                scale=False,
+                transpose=transpose,
+                norm=norm,
+                activation=activation,
             )
+            self.c2 = Block(
+                dim,
+                dim,
+                (kernel_size, kernel_size),
+                stride=1,
+                padding=kernel_size // 2,
+                bias=False,
+                weight_norm=weight_norm,
+                scale=False,
+                transpose=transpose,
+                norm=norm,
+                activation=activation,
+            )
+            self.c3 = Block(
+                dim,
+                dim,
+                (1, 1),
+                stride=1,
+                padding=0,
+                bias=True,
+                weight_norm=weight_norm,
+                scale=True,
+                transpose=transpose,
+            )
+            self.components = [self.c1, self.c2, self.c3]
         else:
-            self.block = nn.Sequential(
-                Block(
-                    indim,
-                    dim,
-                    (kernel_size, kernel_size),
-                    stride=1,
-                    padding=kernel_size // 2,
-                    bias=False,
-                    weight_norm=weight_norm,
-                    scale=False,
-                    transpose=transpose,
-                    norm=norm,
-                    activation=activation,
-                ),
-                Block(
-                    dim,
-                    dim,
-                    (kernel_size, kernel_size),
-                    stride=1,
-                    padding=kernel_size // 2,
-                    bias=True,
-                    weight_norm=weight_norm,
-                    scale=True,
-                    transpose=transpose,
-                    norm=norm,
-                    activation=activation,
-                ),
+            self.c1 = Block(
+                indim,
+                dim,
+                (kernel_size, kernel_size),
+                stride=1,
+                padding=kernel_size // 2,
+                bias=False,
+                weight_norm=weight_norm,
+                scale=False,
+                transpose=transpose,
+                norm="none",
+                activation="none",
             )
+            self.c2 = Block(
+                dim,
+                dim,
+                (kernel_size, kernel_size),
+                stride=1,
+                padding=kernel_size // 2,
+                bias=True,
+                weight_norm=weight_norm,
+                scale=True,
+                transpose=transpose,
+                norm=norm,
+                activation=activation,
+            )
+            self.components = [self.c1, self.c2]
 
-    def forward(self, x):
-        """Forward pass.
+    def forward(self, x, **kwargs):
+        identity = x
 
-        Args:
-            x: input tensor.
-        Returns:
-            transformed tensor.
-        """
         if self.add_coord_channel:
             x = concat_coords(x)
-        return self.block(x)
+
+        for comp in self.components:
+            x = comp(x)
+
+        return x + identity if self.residual else x
 
 
-class ResidualConvBlock(ConvBlock):
-    def forward(self, x):
-        """Forward pass.
+class ConditionedBlock(ConvBlock):
+    MIXERS = {
+        "adain": AdaIN,
+        "film": FiLM,
+        "attn": CrossAttentionMix,
+        "spadain": StatisticPreservingAdaIN,
+    }
 
-        Args:
-            x: input tensor.
-        Returns:
-            transformed tensor.
-        """
-        if self.add_coord_channel:
-            nx = concat_coords(x)
-        else:
-            nx = x
-        return x + self.block(nx)
-
-
-class ScaleBlock(nn.Module):
     def __init__(
         self,
-        blocks: Dict[str, nn.Module],
-        scaling: Block,
-        cond_dim: Optional[int],
-        mix_type: str,
+        dim,
+        cond_dim,
+        kernel_size,
+        bottleneck,
+        weight_norm,
+        transpose=False,
+        norm="batch",
+        activation="leaky_relu",
+        mix_type="adain",
+        residual=False,
+        add_coord_channel=False,
+        **kwargs,
     ):
-        super().__init__()
-        self.blocks = nn.ModuleDict(blocks)
-        self.scaling = scaling
+        internal_norm = "none" if mix_type in ["adain", "film"] else norm
 
-        if cond_dim is not None:
-            if mix_type == "film":
-                self.mix_block = FiLM(cond_dim, self.scaling.out_channels)
-            elif mix_type == "adain":
-                self.mix_block = AdaIN(cond_dim, self.scaling.out_channels)
-            elif mix_type == "norm_film":
-                self.mix_block = NormalizedFiLM(cond_dim, self.scaling.out_channels)
-            elif mix_type == "attention":
-                self.mix_block = Attention(cond_dim, self.scaling.out_channels)
-            else:
-                raise ValueError(f"mix_type {mix_type} not available...")
+        super().__init__(
+            dim=dim,
+            kernel_size=kernel_size,
+            bottleneck=bottleneck,
+            weight_norm=weight_norm,
+            transpose=transpose,
+            norm=internal_norm,
+            activation=activation,
+            residual=residual,
+            add_coord_channel=add_coord_channel,
+            **kwargs,
+        )
+
+        def _get_mixer(mix_type, dim, cond_dim):
+            if mix_type not in self.MIXERS:
+                raise ValueError(f"Mixer {mix_type} is not supported")
+            return self.MIXERS[mix_type](dim, cond_dim)
+
+        self.mix1 = _get_mixer(mix_type, dim, cond_dim)
+        self.mix2 = _get_mixer(mix_type, dim, cond_dim)
+
+    def forward(self, x, cond, **kwargs):
+        identity = x
+
+        if self.add_coord_channel:
+            x = concat_coords(x)
+
+        if self.bottleneck:
+            x = self.c1.forward_conv(x)
+            x = self.c1.forward_norm(x)
+            x = self.mix1(x, cond)
+            x = self.c1.forward_act(x)
+
+            x = self.c2(x)
+
+            x = self.c3.forward_conv(x)
+            x = self.c3.forward_norm(x)
+            x = self.mix2(x, cond)
+            x = self.c3.forward_act(x)
         else:
-            self.mix_block = None
+            x = self.c1.forward_conv(x)
+            x = self.c1.forward_norm(x)
+            x = self.mix1(x, cond)
+            x = self.c1.forward_act(x)
 
-    def forward(self, x, cond=None):
-        for _, b in self.blocks.items():
-            x = b(x)
+            x = self.c2.forward_conv(x)
+            x = self.c2.forward_norm(x)
+            x = self.mix2(x, cond)
+            x = self.c2.forward_act(x)
 
-        x = self.scaling(x)
-        if self.mix_block is not None and cond is not None:
-            x = self.mix_block(x, cond)
-
-        return x
+        return x + identity if self.residual else x
 
 
 class NetworkConfig(TypedDict, total=True):
@@ -514,6 +550,11 @@ def build_network(cfg: NetworkConfig) -> Tuple[nn.Module, int]:
     cond_dim = cfg.get("cond_dim", None)
     mix_type = cfg.get("mix_type", "adain")
 
+    if cond_dim is None:
+        BlockType = ConvBlock
+    else:
+        BlockType = ConditionedBlock
+
     in_channels = cfg["in_channels"]
     base_dim = cfg.get("base_dim", None)
     out_dim = cfg.get("out_dim", None)
@@ -569,27 +610,30 @@ def build_network(cfg: NetworkConfig) -> Tuple[nn.Module, int]:
         in_block = None
         dim = in_channels
 
-    scales = nn.ModuleDict()
+    core = nn.ModuleDict()
 
     for i, scale in enumerate(scale_list):
-        blocks = {}
-        BlockType = ResidualConvBlock if residual[i] else ConvBlock
+        block_residual = residual[i]
         block_norm = norm[i]
         block_act = activation[i]
         block_bn = bottleneck[i]
         block_wn = weight_norm[i]
 
         for j in range(num_blocks[i]):
-            blocks[f"block{j}"] = BlockType(
-                dim,
-                kernel_size=ksize,
-                bottleneck=block_bn,
-                weight_norm=block_wn,
-                norm=block_norm,
-                activation=block_act,
-                transpose=transpose,
-                add_coord_channel=(j == 0 and add_coord_channel),
-            )
+            block_params = {
+                "dim": dim,
+                "kernel_size": ksize,
+                "bottleneck": block_bn,
+                "weight_norm": block_wn,
+                "norm": block_norm,
+                "activation": block_act,
+                "residual": block_residual,
+                "transpose": transpose,
+                "add_coord_channel": (j == 0 and add_coord_channel),
+                "cond_dim": cond_dim,
+                "mix_type": mix_type,
+            }
+            core[f"block_{i}_{j}"] = BlockType(**block_params)
 
         ndim = int(dim * scale)
         scaling = Block(
@@ -606,9 +650,7 @@ def build_network(cfg: NetworkConfig) -> Tuple[nn.Module, int]:
             activation=block_act,
             transpose=transpose,
         )
-        scales[f"scale_{i}"] = ScaleBlock(
-            blocks=blocks, scaling=scaling, cond_dim=cond_dim, mix_type=mix_type
-        )
+        core[f"scale_{i}"] = scaling
         dim = ndim
 
     out_blocks = []
@@ -673,7 +715,7 @@ def build_network(cfg: NetworkConfig) -> Tuple[nn.Module, int]:
         def __init__(self):
             super().__init__()
             self.in_block = in_block
-            self.scales = scales
+            self.core = core
             self.out_block = out_block
 
         def forward(self, x, cond=None):
@@ -683,8 +725,8 @@ def build_network(cfg: NetworkConfig) -> Tuple[nn.Module, int]:
 
                 x = self.in_block(x)
 
-            for _, s in self.scales.items():
-                x = s(x, cond)
+            for _, s in self.core.items():
+                x = s(x, cond=cond)
 
             if self.out_block is not None:
                 if add_coord_channel:

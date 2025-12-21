@@ -1,6 +1,6 @@
-import math
 from typing import Dict, Sequence, Tuple, Union, List
 
+import math
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -10,24 +10,13 @@ from models.blocks import build_network
 from utils import lerp_z, split_dict, combine_dict
 
 
-class BetaVAE(BaseVAE):
+class LogCoshVAE(BaseVAE):
     def __init__(self, **kwargs):
         super().__init__()
         self.latent_dim = kwargs["latent_dim"]
-        self.loss_type = kwargs["loss_type"]
-        self.beta = kwargs.get("beta", None)
-        self.gamma = kwargs.get("gamma", None)
-        self.C_max = kwargs.get("max_capacity", None)
-        self.C_stop_epoch = kwargs.get("C_stop_epoch", 75)
-        self.C_type = kwargs.get("C_type", "linear")
-        self.k = 0.01
 
         enc_cfg = kwargs["encoder"]
         dec_cfg = kwargs["decoder"]
-
-        assert (self.beta is not None) or (
-            self.gamma is not None and self.C_max is not None
-        )
 
         self.encoder, self.enc_out_dim = build_network(enc_cfg)
 
@@ -92,59 +81,31 @@ class BetaVAE(BaseVAE):
         }
 
     def loss_function(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
-        device = next(self.parameters()).device
         x = data["input"]
         x_hat = data["output"]
         mu = data["mu"].flatten(start_dim=1)
         log_var = data["log_var"].flatten(start_dim=1)
 
-        current_epoch = data["current_epoch"]
-
-        var = torch.tensor([1.0], device=device, requires_grad=True)
-
         res_dict = {}
 
-        nll_loss = (x_hat - x).pow(2) / var
-        nll_loss = (nll_loss + torch.log(var)) / 2
-        nll_loss = nll_loss.view(nll_loss.size(0), -1).sum(dim=1)
-        res_dict["nll"] = nll_loss.mean().detach()
+        # Here we apply the negative log likelihood
+        # where the residual is a sech probability distribution
+        # We make this comparable to the vanilla vae implementation
+        # by assuming sigma=1 and ignore the constant term
+        exp_term = math.pi * (x_hat - x) / 2.0
+        nll_loss = exp_term + torch.log(1.0 + torch.exp(-2 * exp_term))
+        nll_loss = nll_loss.flatten(start_dim=1).sum(dim=1)
+        nll_loss = nll_loss.mean()
+        res_dict["nll"] = nll_loss.detach()
 
         kld_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1.0 - log_var, dim=1)
-        res_dict["kld"] = kld_loss.mean().detach()
+        kld_loss = kld_loss.mean()
+        res_dict["kld"] = kld_loss.detach()
 
-        loss = nll_loss
-
-        if self.loss_type == "B":
-            loss += self.beta * kld_loss
-        elif self.loss_type == "H":
-            if self.C_type == "linear":
-                C = torch.clamp(
-                    torch.tensor([float(self.C_max)], device=device, requires_grad=True)
-                    / self.C_stop_epoch
-                    * current_epoch,
-                    0,
-                    self.C_max,
-                )
-            elif self.C_type == "exp":
-                C = torch.clamp(
-                    torch.tensor([float(self.C_max)], device=device, requires_grad=True)
-                    * (
-                        1
-                        - math.exp(math.log(self.k) * current_epoch / self.C_stop_epoch)
-                    ),
-                    0,
-                    self.C_max,
-                )
-            else:
-                raise ValueError(f"C annealing function {self.C_type} not available")
-            res_dict["C"] = C
-            cap_kld_loss = (kld_loss - C).abs()
-            loss += self.gamma * cap_kld_loss
-
-        loss = loss.mean()
+        loss = nll_loss + kld_loss
         res_dict["loss"] = loss
 
-        res_dict["elbo"] = -(nll_loss + kld_loss).mean().detach()
+        res_dict["elbo"] = -(nll_loss + kld_loss).detach()
 
         return res_dict
 

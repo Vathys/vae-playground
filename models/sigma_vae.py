@@ -1,8 +1,9 @@
-import math
 from typing import Dict, Sequence, Tuple, Union, List
 
+import math
 import torch
-import torch.nn as nn
+from torch import nn
+from torch.nn import functional as F
 from torch import Tensor
 
 from models.base import BaseVAE
@@ -10,24 +11,27 @@ from models.blocks import build_network
 from utils import lerp_z, split_dict, combine_dict
 
 
-class BetaVAE(BaseVAE):
+def softclip(tensor, min):
+    return min + F.softplus(tensor - min)
+
+
+class SigmaVAE(BaseVAE):
     def __init__(self, **kwargs):
         super().__init__()
         self.latent_dim = kwargs["latent_dim"]
-        self.loss_type = kwargs["loss_type"]
-        self.beta = kwargs.get("beta", None)
-        self.gamma = kwargs.get("gamma", None)
-        self.C_max = kwargs.get("max_capacity", None)
-        self.C_stop_epoch = kwargs.get("C_stop_epoch", 75)
-        self.C_type = kwargs.get("C_type", "linear")
+        self.residual_type = kwargs["residual_type"]
+        self.variant = kwargs["variant"]
+        self.epoch_end = kwargs.get("anneal_stop_epoch", 60)
+        self.log_sigma_start = kwargs.get("logsigma_start", 0)
+        self.log_sigma_end = kwargs.get("logsigma_end", -6)
+
+        self.C_type = kwargs.get("C_type", None)
+        self.gamma = kwargs.get("gamma", 10)
+        self.C_max = kwargs.get("max_capacity", 50)
         self.k = 0.01
 
         enc_cfg = kwargs["encoder"]
         dec_cfg = kwargs["decoder"]
-
-        assert (self.beta is not None) or (
-            self.gamma is not None and self.C_max is not None
-        )
 
         self.encoder, self.enc_out_dim = build_network(enc_cfg)
 
@@ -42,6 +46,19 @@ class BetaVAE(BaseVAE):
         dec_cfg["base_dim"] = self.enc_out_dim
 
         self.decoder, self.dec_out_dim = build_network(dec_cfg)
+
+        self.log_sigma = 0
+        if self.variant == "learn":
+            self.log_sigma = torch.nn.Parameter(
+                torch.tensor(0.0, dtype=torch.float32),
+                requires_grad=True,
+            )
+
+        self.C = 0
+        if self.C_type == "learn":
+            self.C = torch.nn.Parameter(
+                torch.tensor(0.0, dtype=torch.float32), requires_grad=True
+            )
 
     def encode(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
         x = data["input"]
@@ -91,8 +108,18 @@ class BetaVAE(BaseVAE):
             "log_var": encoded["log_var"],
         }
 
+    def _gaussian_nll(self, x_hat: Tensor, x: Tensor, log_sigma: Tensor):
+        nll = torch.pow((x - x_hat) / log_sigma.exp(), 2) / 2
+        nll = nll + log_sigma + 0.5 * math.log(2 * math.pi)
+        return nll
+
+    def _sech_nll(self, x_hat: Tensor, x: Tensor, log_sigma: Tensor):
+        exp_term = math.pi * (x - x_hat) / (2.0 * log_sigma.exp())
+        nll = exp_term + torch.log(1 + torch.exp(-2 * exp_term))
+        nll = nll + log_sigma
+        return nll
+
     def loss_function(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
-        device = next(self.parameters()).device
         x = data["input"]
         x_hat = data["output"]
         mu = data["mu"].flatten(start_dim=1)
@@ -100,51 +127,77 @@ class BetaVAE(BaseVAE):
 
         current_epoch = data["current_epoch"]
 
-        var = torch.tensor([1.0], device=device, requires_grad=True)
-
         res_dict = {}
 
-        nll_loss = (x_hat - x).pow(2) / var
-        nll_loss = (nll_loss + torch.log(var)) / 2
-        nll_loss = nll_loss.view(nll_loss.size(0), -1).sum(dim=1)
-        res_dict["nll"] = nll_loss.mean().detach()
+        if self.variant == "optimal":
+            log_sigma = (x_hat - x).pow(2).mean().sqrt().log()
+            log_sigma = softclip(log_sigma, -6)
+        elif self.variant == "learn":
+            log_sigma = self.log_sigma
+            log_sigma = softclip(log_sigma, -6)
+        elif self.variant == "std":
+            log_sigma = torch.zeros([], dtype=torch.float32, device=self.device)
+        elif self.variant == "anneal":
+            sig_diff = self.log_sigma_end - self.log_sigma_start
+            log_sigma = torch.clamp(
+                torch.tensor(
+                    self.log_sigma_start + (sig_diff * current_epoch / self.epoch_end)
+                ),
+                min=min(self.log_sigma_start, self.log_sigma_end),
+                max=max(self.log_sigma_end, self.log_sigma_start),
+            )
+        else:
+            raise ValueError(f"sigma variant {self.variant} is not supported")
+
+        if self.residual_type == "gaussian":
+            nll_loss = self._gaussian_nll(x_hat, x, log_sigma)
+        elif self.residual_type == "sech":
+            nll_loss = self._sech_nll(x_hat, x, log_sigma)
+        else:
+            raise ValueError(
+                f"residual distribution {self.residual_type} is not supported"
+            )
+
+        nll_loss = nll_loss.flatten(start_dim=1).sum(dim=1)
+        nll_loss = nll_loss.mean()
+        res_dict["nll"] = nll_loss.detach()
+        res_dict["sigma"] = log_sigma.exp().detach()
 
         kld_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1.0 - log_var, dim=1)
-        res_dict["kld"] = kld_loss.mean().detach()
+        kld_loss = kld_loss.mean()
+        res_dict["kld"] = kld_loss.detach()
 
         loss = nll_loss
 
-        if self.loss_type == "B":
-            loss += self.beta * kld_loss
-        elif self.loss_type == "H":
+        if self.C_type is not None:
             if self.C_type == "linear":
                 C = torch.clamp(
-                    torch.tensor([float(self.C_max)], device=device, requires_grad=True)
-                    / self.C_stop_epoch
+                    torch.tensor(float(self.C_max), device=self.device)
+                    / self.epoch_end
                     * current_epoch,
                     0,
                     self.C_max,
                 )
             elif self.C_type == "exp":
                 C = torch.clamp(
-                    torch.tensor([float(self.C_max)], device=device, requires_grad=True)
-                    * (
-                        1
-                        - math.exp(math.log(self.k) * current_epoch / self.C_stop_epoch)
-                    ),
+                    torch.tensor(float(self.C_max), device=self.device)
+                    * (1 - math.exp(math.log(self.k) * current_epoch / self.epoch_end)),
                     0,
                     self.C_max,
                 )
+            elif self.C_type == "learn":
+                C = self.C
             else:
                 raise ValueError(f"C annealing function {self.C_type} not available")
-            res_dict["C"] = C
+            res_dict["C"] = C.detach()
             cap_kld_loss = (kld_loss - C).abs()
             loss += self.gamma * cap_kld_loss
+        else:
+            loss += kld_loss
 
-        loss = loss.mean()
         res_dict["loss"] = loss
 
-        res_dict["elbo"] = -(nll_loss + kld_loss).mean().detach()
+        res_dict["elbo"] = -(nll_loss + kld_loss).detach()
 
         return res_dict
 

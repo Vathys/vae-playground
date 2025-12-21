@@ -52,7 +52,6 @@ experiment_params:
     eta_min: 0.00005
   manual_seed: 1265
   max_epochs: 100
-  test_latent_size: [4, 4]
   metrics: ["lpips", "ssim", "psnr", "fid"]
 
 trainer_params:

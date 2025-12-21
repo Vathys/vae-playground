@@ -26,11 +26,11 @@ class BaseVAE(nn.Module):
     ) -> Dict[str, Tensor]:
         raise NotImplementedError
 
-    def sample_test(
+    def interpolate(
         self,
-        latent_size: Union[int, Tuple[int, int], Sequence[int]],
-        num: int,
-        inter: int = 5,
+        encoded_a: Dict[str, Tensor],
+        encoded_b: Dict[str, Tensor],
+        steps: int = 5,
         batch_size: int = 1,
     ) -> List[Dict[str, Tensor]]:
         raise NotImplementedError

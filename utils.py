@@ -1,3 +1,4 @@
+from typing import Dict, List
 import logging
 import time
 
@@ -142,7 +143,7 @@ def lerp_z(z1: torch.Tensor, z2: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
     return z1.unsqueeze(0) * (1 - t_reshaped) + z2.unsqueeze(0) * t_reshaped
 
 
-def slerp_z(z1: torch.Tensor, z2: torch.Tensor, t: torch.Tensor):
+def slerp_z(z1: torch.Tensor, z2: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
     """
     Calculate the spherical lerp between two tensors z1, z2 with time values t.
 
@@ -176,3 +177,40 @@ def slerp_z(z1: torch.Tensor, z2: torch.Tensor, t: torch.Tensor):
     t2 = (torch.sin(t_reshaped * theta) / sin_theta) * z2
 
     return t1 + t2
+
+
+def split_dict(
+    tensor_dict: Dict[str, torch.Tensor], batch_size: int
+) -> List[Dict[str, torch.Tensor]]:
+    assert (
+        len({t.size(0) for t in tensor_dict.values()}) == 1
+    ), "All tensors have the same batch size"
+    B = list({t.size(0) for t in tensor_dict.values()})[0]
+
+    if B % batch_size != 0:
+        raise ValueError(f"Cannot divide {B} vectors into batch_size={batch_size}")
+
+    expanded = {}
+    for key, tensor in tensor_dict.items():
+        B, *size = tensor.shape
+        expanded[key] = tensor.view(B // batch_size, batch_size, *size)
+
+    batched_dict = [
+        {key: tensor[i] for key, tensor in expanded.items()}
+        for i in range(B // batch_size)
+    ]
+
+    return batched_dict
+
+
+def combine_dict(dict_list: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+    assert (
+        len({frozenset(d.keys()) for d in dict_list}) <= 1
+    ), "All dictionaries must strictly contain the same keys"
+    keys = list(list({frozenset(d.keys()) for d in dict_list})[0])
+
+    combined = {}
+    for key in keys:
+        combined[key] = torch.cat([d[key] for d in dict_list], dim=0)
+
+    return combined

@@ -3,7 +3,10 @@ from models.beta_vae import BetaVAE
 from models.conditioned_vae import ConditionedVAE
 from models.flow_vae import FlowVAE
 from models.hierarchical_vae import HierarchicalVAE
+from models.mmd_vae import MMDVAE
 from models.vanilla_vae import VanillaVAE
+from models.logcosh_vae import LogCoshVAE
+from models.sigma_vae import SigmaVAE
 
 vae_models = {
     "VanillaVAE": VanillaVAE,
@@ -11,6 +14,9 @@ vae_models = {
     "FlowVAE": FlowVAE,
     "ConditionedVAE": ConditionedVAE,
     "HierarchicalVAE": HierarchicalVAE,
+    "MMDVAE": MMDVAE,
+    "LogCoshVAE": LogCoshVAE,
+    "SigmaVAE": SigmaVAE,
 }
 
 

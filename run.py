@@ -59,7 +59,6 @@ runner = Trainer(
         ),
         LogPerformanceCallback(),
     ],
-    max_epochs=config["experiment_params"]["max_epochs"],
     **config["trainer_params"],
 )
 

@@ -1,5 +1,5 @@
 model_params:
-  name: "VanillaVAE"
+  name: "LogCoshVAE"
   latent_dim: 4
   encoder:
     in_channels: 3
@@ -47,8 +47,6 @@ experiment_params:
     eta_min: 0.00005
   manual_seed: 1265
   max_epochs: 100
-  test_latent_sizes:
-    - [4, 4]
   metrics: ["lpips", "ssim", "psnr", "fid"]
 
 trainer_params:
@@ -60,4 +58,4 @@ trainer_params:
 
 logging_params:
   save_dir: "logs/"
-  name: "VanillaVAE"
+  name: "LogCoshVAE"

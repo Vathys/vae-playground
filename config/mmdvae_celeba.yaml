@@ -1,6 +1,11 @@
 model_params:
-  name: "VanillaVAE"
+  name: "MMDVAE"
   latent_dim: 4
+  kernel_type: imq
+  alpha: 0.5
+  lambda: 0.003
+  kernel_scales: [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+  kernel_bandwidth: 1
   encoder:
     in_channels: 3
     base_dim: 8
@@ -47,8 +52,6 @@ experiment_params:
     eta_min: 0.00005
   manual_seed: 1265
   max_epochs: 100
-  test_latent_sizes:
-    - [4, 4]
   metrics: ["lpips", "ssim", "psnr", "fid"]
 
 trainer_params:
@@ -60,4 +63,4 @@ trainer_params:
 
 logging_params:
   save_dir: "logs/"
-  name: "VanillaVAE"
+  name: "MMDVAE"

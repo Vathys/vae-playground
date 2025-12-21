@@ -1,4 +1,3 @@
-import math
 from typing import Dict, Sequence, Tuple, Union, List
 
 import torch
@@ -10,24 +9,19 @@ from models.blocks import build_network
 from utils import lerp_z, split_dict, combine_dict
 
 
-class BetaVAE(BaseVAE):
+class MMDVAE(BaseVAE):
     def __init__(self, **kwargs):
         super().__init__()
         self.latent_dim = kwargs["latent_dim"]
-        self.loss_type = kwargs["loss_type"]
-        self.beta = kwargs.get("beta", None)
-        self.gamma = kwargs.get("gamma", None)
-        self.C_max = kwargs.get("max_capacity", None)
-        self.C_stop_epoch = kwargs.get("C_stop_epoch", 75)
-        self.C_type = kwargs.get("C_type", "linear")
-        self.k = 0.01
+        self.kernel_type = kwargs.get("kernel_type", "imq")
+        self.kernel_scales = kwargs.get(
+            "kernel_scales", [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+        )
+        self.kernel_bandwidth = kwargs.get("kernel_bandwidth", 1.0)
+        self.lmbda = kwargs.get("lambda", 0.01)
 
         enc_cfg = kwargs["encoder"]
         dec_cfg = kwargs["decoder"]
-
-        assert (self.beta is not None) or (
-            self.gamma is not None and self.C_max is not None
-        )
 
         self.encoder, self.enc_out_dim = build_network(enc_cfg)
 
@@ -87,64 +81,96 @@ class BetaVAE(BaseVAE):
         return {
             "input": data["input"],
             "output": decoded["output"],
+            "z": z,
             "mu": encoded["mu"],
             "log_var": encoded["log_var"],
         }
 
+    def _compute_rbf(self, z1: Tensor, z2: Tensor) -> Tensor:
+        D = z1.size(-1)
+        C_base = 2.0 * D * self.kernel_bandwidth**2
+
+        k = 0
+
+        for scale in self.scales:
+            C = scale * C_base
+            k += torch.exp(
+                -torch.norm(z1.unsqueeze(1) - z2.unsqueeze(0), dim=-1) ** 2 / C
+            )
+
+        return k
+
+    def _compute_inv_mult_quad(self, z1: Tensor, z2: Tensor) -> Tensor:
+        D = z1.size(-1)
+        C_base = 2.0 * D * self.kernel_bandwidth**2
+
+        k = 0
+
+        for scale in self.scales:
+            C = scale * C_base
+            k += C / (C + torch.norm(z1.unsqueeze(1) - z2.unsqueeze(0), dim=-1) ** 2)
+
+        return k
+
+    def _compute_kernel(self, x1: Tensor, x2: Tensor) -> Tensor:
+        x1 = x1.flatten(start_dim=1)
+        x2 = x2.flatten(start_dim=1)
+
+        if self.kernel_type == "rbf":
+            result = self._compute_rbf(x1, x2)
+        elif self.kernel_type == "imq":
+            result = self._compute_inv_mult_quad(x1, x2)
+        else:
+            raise ValueError(f"kernel_type {self.kernel_type} is not supported...")
+
+        return result
+
+    def _compute_mmd(self, z: Tensor):
+        prior_z = torch.randn_like(z)
+
+        B = z.shape[0]
+
+        k_z_prior = self._compute_kernel(prior_z, prior_z)
+        k_z = self._compute_kernel(z, z)
+        k_cross = self._compute_kernel(prior_z, z)
+
+        mmd_z = (k_z - k_z.diag().diag()).sum() / ((B - 1) * B)
+        mmd_z_prior = (k_z_prior - k_z_prior.diag().diag()).sum() / ((B - 1) * B)
+        mmd_cross = k_cross.sum() / (B**2)
+
+        mmd = mmd_z + mmd_z_prior - 2 * mmd_cross
+
+        return mmd
+
     def loss_function(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
-        device = next(self.parameters()).device
         x = data["input"]
         x_hat = data["output"]
         mu = data["mu"].flatten(start_dim=1)
         log_var = data["log_var"].flatten(start_dim=1)
-
-        current_epoch = data["current_epoch"]
-
-        var = torch.tensor([1.0], device=device, requires_grad=True)
+        z = data["z"]
 
         res_dict = {}
 
-        nll_loss = (x_hat - x).pow(2) / var
-        nll_loss = (nll_loss + torch.log(var)) / 2
+        nll_loss = (x_hat - x).pow(2) / 2.0
         nll_loss = nll_loss.view(nll_loss.size(0), -1).sum(dim=1)
-        res_dict["nll"] = nll_loss.mean().detach()
+        nll_loss = nll_loss.mean()
+        res_dict["nll"] = nll_loss.detach()
 
         kld_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1.0 - log_var, dim=1)
-        res_dict["kld"] = kld_loss.mean().detach()
+        kld_loss = kld_loss.mean()
+        res_dict["kld"] = kld_loss.detach()
 
-        loss = nll_loss
+        mmd_loss = self._compute_mmd(z)
+        res_dict["mmd"] = mmd_loss.detach()
 
-        if self.loss_type == "B":
-            loss += self.beta * kld_loss
-        elif self.loss_type == "H":
-            if self.C_type == "linear":
-                C = torch.clamp(
-                    torch.tensor([float(self.C_max)], device=device, requires_grad=True)
-                    / self.C_stop_epoch
-                    * current_epoch,
-                    0,
-                    self.C_max,
-                )
-            elif self.C_type == "exp":
-                C = torch.clamp(
-                    torch.tensor([float(self.C_max)], device=device, requires_grad=True)
-                    * (
-                        1
-                        - math.exp(math.log(self.k) * current_epoch / self.C_stop_epoch)
-                    ),
-                    0,
-                    self.C_max,
-                )
-            else:
-                raise ValueError(f"C annealing function {self.C_type} not available")
-            res_dict["C"] = C
-            cap_kld_loss = (kld_loss - C).abs()
-            loss += self.gamma * cap_kld_loss
-
-        loss = loss.mean()
+        loss = (
+            nll_loss
+            + (1 - self.alph) * kld_loss
+            + (self.alph + self.lam - 1) * mmd_loss
+        )
         res_dict["loss"] = loss
 
-        res_dict["elbo"] = -(nll_loss + kld_loss).mean().detach()
+        res_dict["elbo"] = -(nll_loss + kld_loss).detach()
 
         return res_dict
 

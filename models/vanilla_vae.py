@@ -1,4 +1,4 @@
-from typing import Dict, Sequence, Tuple, Union
+from typing import Dict, Sequence, Tuple, Union, List
 
 import torch
 import torch.nn as nn
@@ -6,7 +6,7 @@ from torch import Tensor
 
 from models.base import BaseVAE
 from models.blocks import build_network
-from utils import lerp_z
+from utils import lerp_z, split_dict, combine_dict
 
 
 class VanillaVAE(BaseVAE):
@@ -80,18 +80,14 @@ class VanillaVAE(BaseVAE):
         }
 
     def loss_function(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
-        device = next(self.parameters()).device
         x = data["input"]
         x_hat = data["output"]
         mu = data["mu"].flatten(start_dim=1)
         log_var = data["log_var"].flatten(start_dim=1)
 
-        var = torch.tensor([1.0], device=device, requires_grad=True)
-
         res_dict = {}
 
-        nll_loss = (x_hat - x).pow(2) / var
-        nll_loss = (nll_loss + torch.log(var)) / 2
+        nll_loss = (x_hat - x).pow(2) / 2.0
         nll_loss = nll_loss.view(nll_loss.size(0), -1).sum(dim=1)
         res_dict["nll"] = nll_loss.mean().detach()
 
@@ -106,41 +102,33 @@ class VanillaVAE(BaseVAE):
 
         return res_dict
 
-    def sample_test(
+    def interpolate(
         self,
-        latent_size: Union[int, Tuple[int, int], Sequence[int]],
-        num: int,
-        inter: int = 5,
+        encoded_a: Dict[str, Tensor],
+        encoded_b: Dict[str, Tensor],
+        steps: int = 5,
         batch_size: int = 1,
-    ):
-        samples = self.sample(latent_size, num * 2)
+    ) -> List[Dict[str, Tensor]]:
+        anchors_a = self.reparametrize(encoded_a["mu"], encoded_a["log_var"])
+        anchors_b = self.reparametrize(encoded_b["mu"], encoded_b["log_var"])
 
-        anchors = samples["z"]
-        latent_size = samples["latent_size"]
+        assert anchors_a.size(0) == anchors_b.size(0)
 
-        pairs = anchors.view(num, 2, self.latent_dim, *latent_size)
+        B, *size = anchors_a.shape
 
-        all_interps = []
+        t_vals = torch.linspace(0, 1, steps, device=self.device)
 
-        t_vals = torch.linspace(0, 1, inter, device=self.device)
+        z_interps = (
+            lerp_z(anchors_a, anchors_b, t_vals)
+            .transpose(0, 1)
+            .contiguous()
+            .view(B * steps, *size)
+        )  # [B * steps, ...]
 
-        for i in range(num):
-            z1, z2 = pairs[i]
+        split = split_dict({"z": z_interps}, batch_size)
 
-            interped = lerp_z(z1, z2, t_vals)
+        decoded = [self.decode(batch) for batch in split]
 
-            all_interps.append(interped)
+        decoded = combine_dict(decoded)
 
-        all_interps = torch.cat(all_interps, dim=0)
-
-        total = all_interps.size(0)
-        if total % batch_size != 0:
-            raise ValueError(
-                f"Cannot divide {total} vectors evenly into batch_size={batch_size}"
-            )
-
-        batched = all_interps.view(
-            total // batch_size, batch_size, self.latent_dim, *latent_size
-        )
-
-        return [{"z": batched[i]} for i in range(batched.size(0))]
+        return [decoded]
