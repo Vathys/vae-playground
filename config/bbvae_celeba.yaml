@@ -57,6 +57,7 @@ trainer_params:
   precision: "32-true"
   gradient_clip_val: 5.0
   gradient_clip_algorithm: norm
+  max_epochs: 100
 
 logging_params:
   save_dir: "logs/"
