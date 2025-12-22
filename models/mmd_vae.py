@@ -1,4 +1,4 @@
-from typing import Dict, Sequence, Tuple, Union, List
+from typing import Dict, List, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -6,7 +6,7 @@ from torch import Tensor
 
 from models.base import BaseVAE
 from models.blocks import build_network
-from utils import lerp_z, split_dict, combine_dict
+from utils import combine_dict, lerp_z, split_dict
 
 
 class MMDVAE(BaseVAE):
@@ -149,10 +149,12 @@ class MMDVAE(BaseVAE):
         log_var = data["log_var"].flatten(start_dim=1)
         z = data["z"]
 
+        log_sigma = torch.tensor([0.0], device=self.device)
+
         res_dict = {}
 
-        nll_loss = (x_hat - x).pow(2) / 2.0
-        nll_loss = nll_loss.view(nll_loss.size(0), -1).sum(dim=1)
+        nll_loss = self._gaussian_nll(x_hat, x, log_sigma)
+        nll_loss = nll_loss.flatten(start_dim=1).sum(dim=1)
         nll_loss = nll_loss.mean()
         res_dict["nll"] = nll_loss.detach()
 

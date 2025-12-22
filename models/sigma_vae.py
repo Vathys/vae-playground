@@ -1,14 +1,13 @@
-from typing import Dict, Sequence, Tuple, Union, List
-
 import math
+from typing import Dict, List, Sequence, Tuple, Union
+
 import torch
-from torch import nn
+from torch import Tensor, nn
 from torch.nn import functional as F
-from torch import Tensor
 
 from models.base import BaseVAE
 from models.blocks import build_network
-from utils import lerp_z, split_dict, combine_dict
+from utils import combine_dict, lerp_z, split_dict
 
 
 def softclip(tensor, min):
@@ -107,17 +106,6 @@ class SigmaVAE(BaseVAE):
             "mu": encoded["mu"],
             "log_var": encoded["log_var"],
         }
-
-    def _gaussian_nll(self, x_hat: Tensor, x: Tensor, log_sigma: Tensor):
-        nll = torch.pow((x - x_hat) / log_sigma.exp(), 2) / 2
-        nll = nll + log_sigma + 0.5 * math.log(2 * math.pi)
-        return nll
-
-    def _sech_nll(self, x_hat: Tensor, x: Tensor, log_sigma: Tensor):
-        exp_term = math.pi * (x - x_hat) / (2.0 * log_sigma.exp())
-        nll = exp_term + torch.log(1 + torch.exp(-2 * exp_term))
-        nll = nll + log_sigma
-        return nll
 
     def loss_function(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
         x = data["input"]

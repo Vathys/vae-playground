@@ -1,3 +1,4 @@
+import math
 from abc import abstractmethod
 from typing import Dict, List, Sequence, Tuple, Union
 
@@ -42,3 +43,16 @@ class BaseVAE(nn.Module):
     @abstractmethod
     def loss_function(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
         pass
+
+    @classmethod
+    def _gaussian_nll(cls, x_hat: Tensor, x: Tensor, log_sigma: Tensor):
+        nll = torch.pow((x - x_hat) / log_sigma.exp(), 2) / 2
+        nll = nll + log_sigma + 0.5 * math.log(2 * math.pi)
+        return nll
+
+    @classmethod
+    def _sech_nll(cls, x_hat: Tensor, x: Tensor, log_sigma: Tensor):
+        exp_term = math.pi * (x - x_hat) / (2.0 * log_sigma.exp())
+        nll = exp_term + torch.log(1 + torch.exp(-2 * exp_term))
+        nll = nll + log_sigma
+        return nll

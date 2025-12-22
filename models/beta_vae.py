@@ -1,5 +1,5 @@
 import math
-from typing import Dict, Sequence, Tuple, Union, List
+from typing import Dict, List, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -7,7 +7,7 @@ from torch import Tensor
 
 from models.base import BaseVAE
 from models.blocks import build_network
-from utils import lerp_z, split_dict, combine_dict
+from utils import combine_dict, lerp_z, split_dict
 
 
 class BetaVAE(BaseVAE):
@@ -92,7 +92,6 @@ class BetaVAE(BaseVAE):
         }
 
     def loss_function(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
-        device = next(self.parameters()).device
         x = data["input"]
         x_hat = data["output"]
         mu = data["mu"].flatten(start_dim=1)
@@ -100,17 +99,18 @@ class BetaVAE(BaseVAE):
 
         current_epoch = data["current_epoch"]
 
-        var = torch.tensor([1.0], device=device, requires_grad=True)
+        log_sigma = torch.tensor([0.0], device=self.device)
 
         res_dict = {}
 
-        nll_loss = (x_hat - x).pow(2) / var
-        nll_loss = (nll_loss + torch.log(var)) / 2
-        nll_loss = nll_loss.view(nll_loss.size(0), -1).sum(dim=1)
-        res_dict["nll"] = nll_loss.mean().detach()
+        nll_loss = self._gaussian_nll(x_hat, x, log_sigma)
+        nll_loss = nll_loss.flatten(start_dim=1).sum(dim=1)
+        nll_loss = nll_loss.mean()
+        res_dict["nll"] = nll_loss.detach()
 
         kld_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1.0 - log_var, dim=1)
-        res_dict["kld"] = kld_loss.mean().detach()
+        kld_loss = kld_loss.mean()
+        res_dict["kld"] = kld_loss.detach()
 
         loss = nll_loss
 
@@ -119,7 +119,7 @@ class BetaVAE(BaseVAE):
         elif self.loss_type == "H":
             if self.C_type == "linear":
                 C = torch.clamp(
-                    torch.tensor([float(self.C_max)], device=device, requires_grad=True)
+                    torch.tensor(float(self.C_max), device=self.device)
                     / self.C_stop_epoch
                     * current_epoch,
                     0,
@@ -127,7 +127,7 @@ class BetaVAE(BaseVAE):
                 )
             elif self.C_type == "exp":
                 C = torch.clamp(
-                    torch.tensor([float(self.C_max)], device=device, requires_grad=True)
+                    torch.tensor(float(self.C_max), device=self.device)
                     * (
                         1
                         - math.exp(math.log(self.k) * current_epoch / self.C_stop_epoch)
@@ -141,10 +141,9 @@ class BetaVAE(BaseVAE):
             cap_kld_loss = (kld_loss - C).abs()
             loss += self.gamma * cap_kld_loss
 
-        loss = loss.mean()
         res_dict["loss"] = loss
 
-        res_dict["elbo"] = -(nll_loss + kld_loss).mean().detach()
+        res_dict["elbo"] = -(nll_loss + kld_loss).detach()
 
         return res_dict
 

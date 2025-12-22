@@ -154,7 +154,6 @@ class HierarchicalVAE(BaseVAE):
         }
 
     def loss_function(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
-        device = next(self.parameters()).device
         x = data["input"]
         x_hat = data["output"]
         mu1 = data["mu"][0].flatten(start_dim=1)
@@ -164,17 +163,18 @@ class HierarchicalVAE(BaseVAE):
         prior_mu = data["prior_mu"].flatten(start_dim=1)
         prior_log_var = data["prior_log_var"].flatten(start_dim=1)
 
-        var = torch.tensor([1.0], device=device, requires_grad=True)
+        log_sigma = torch.tensor([0.0], device=self.device)
 
         res_dict = {}
 
-        nll_loss = (x_hat - x).pow(2) / var
-        nll_loss = (nll_loss + torch.log(var)) / 2
-        nll_loss = nll_loss.view(nll_loss.size(0), -1).sum(dim=1)
-        res_dict["nll"] = nll_loss.mean().detach()
+        nll_loss = self._gaussian_nll(x_hat, x, log_sigma)
+        nll_loss = nll_loss.flatten(start_dim=1).sum(dim=1)
+        nll_loss = nll_loss.mean()
+        res_dict["nll"] = nll_loss.detach()
 
         kld2_loss = 0.5 * torch.sum(mu2.pow(2) + log_var2.exp() - 1.0 - log_var2, dim=1)
-        res_dict["kld2"] = kld2_loss.mean().detach()
+        kld2_loss = kld2_loss.mean()
+        res_dict["kld2"] = kld2_loss.detach()
 
         kld1_loss = 0.5 * torch.sum(
             ((mu1 - prior_mu).pow(2) / prior_log_var.exp())
@@ -184,13 +184,13 @@ class HierarchicalVAE(BaseVAE):
             - 1.0,
             dim=1,
         )
-        res_dict["kld1"] = kld1_loss.mean().detach()
+        kld1_loss = kld1_loss.mean()
+        res_dict["kld1"] = kld1_loss.detach()
 
         loss = nll_loss + kld2_loss + kld1_loss
-        loss = loss.mean()
         res_dict["loss"] = loss
 
-        res_dict["elbo"] = -loss.detach()
+        res_dict["elbo"] = -(nll_loss + kld2_loss + kld1_loss).detach()
 
         return res_dict
 

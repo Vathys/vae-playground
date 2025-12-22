@@ -532,8 +532,8 @@ def build_network(cfg: NetworkConfig) -> Tuple[nn.Module, int]:
         - cond_dim (int, optional): dimension of conditional vector
         - mix_type (string, optional): how to mix conditional vector into network
           (default: adain)
-        - add_coord_channel (bool, optional): add a coord channel before scaling to help with
-          absolute positioning while scaling (default: false)
+        - add_coord_channel (bool, optional): add a coord channel before scaling to
+          help with absolute positioning while scaling (default: false)
 
     :type cfg: Dict[str, Optional[Any]]
     :return: Network and out dimension

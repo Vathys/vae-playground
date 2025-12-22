@@ -1,4 +1,4 @@
-from typing import Dict, Sequence, Tuple, Union, List
+from typing import Dict, List, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -6,7 +6,7 @@ from torch import Tensor
 
 from models.base import BaseVAE
 from models.blocks import build_network
-from utils import lerp_z, split_dict, combine_dict
+from utils import combine_dict, lerp_z, split_dict
 
 
 class VanillaVAE(BaseVAE):
@@ -85,20 +85,23 @@ class VanillaVAE(BaseVAE):
         mu = data["mu"].flatten(start_dim=1)
         log_var = data["log_var"].flatten(start_dim=1)
 
+        log_sigma = torch.tensor([0.0], device=self.device)
+
         res_dict = {}
 
-        nll_loss = (x_hat - x).pow(2) / 2.0
-        nll_loss = nll_loss.view(nll_loss.size(0), -1).sum(dim=1)
-        res_dict["nll"] = nll_loss.mean().detach()
+        nll_loss = self._gaussian_nll(x_hat, x, log_sigma)
+        nll_loss = nll_loss.flatten(start_dim=1).sum(dim=1)
+        nll_loss = nll_loss.mean()
+        res_dict["nll"] = nll_loss.detach()
 
         kld_loss = 0.5 * torch.sum(mu.pow(2) + log_var.exp() - 1.0 - log_var, dim=1)
-        res_dict["kld"] = kld_loss.mean().detach()
+        kld_loss = kld_loss.mean()
+        res_dict["kld"] = kld_loss.detach()
 
         loss = nll_loss + kld_loss
-        loss = loss.mean()
         res_dict["loss"] = loss
 
-        res_dict["elbo"] = -(nll_loss + kld_loss).mean().detach()
+        res_dict["elbo"] = -(nll_loss + kld_loss).detach()
 
         return res_dict
 

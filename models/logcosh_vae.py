@@ -1,13 +1,12 @@
-from typing import Dict, Sequence, Tuple, Union, List
+from typing import Dict, List, Sequence, Tuple, Union
 
-import math
 import torch
 import torch.nn as nn
 from torch import Tensor
 
 from models.base import BaseVAE
 from models.blocks import build_network
-from utils import lerp_z, split_dict, combine_dict
+from utils import combine_dict, lerp_z, split_dict
 
 
 class LogCoshVAE(BaseVAE):
@@ -86,14 +85,15 @@ class LogCoshVAE(BaseVAE):
         mu = data["mu"].flatten(start_dim=1)
         log_var = data["log_var"].flatten(start_dim=1)
 
+        log_sigma = torch.tensor([0.0], device=self.device)
+
         res_dict = {}
 
         # Here we apply the negative log likelihood
         # where the residual is a sech probability distribution
         # We make this comparable to the vanilla vae implementation
-        # by assuming sigma=1 and ignore the constant term
-        exp_term = math.pi * (x_hat - x) / 2.0
-        nll_loss = exp_term + torch.log(1.0 + torch.exp(-2 * exp_term))
+        # by assuming sigma=1
+        nll_loss = self._sech_nll(x_hat, x, log_sigma)
         nll_loss = nll_loss.flatten(start_dim=1).sum(dim=1)
         nll_loss = nll_loss.mean()
         res_dict["nll"] = nll_loss.detach()

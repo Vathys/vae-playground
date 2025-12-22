@@ -1,5 +1,5 @@
 import math
-from typing import Dict, Sequence, Tuple, Union, List
+from typing import Dict, List, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -9,7 +9,7 @@ from torch.nn import functional as F
 from external.magface import load_magface
 from models.base import BaseVAE
 from models.blocks import build_network
-from utils import lerp_z, slerp_z, split_dict, combine_dict
+from utils import combine_dict, lerp_z, slerp_z, split_dict
 
 
 class ConditionedVAE(BaseVAE):
@@ -132,17 +132,6 @@ class ConditionedVAE(BaseVAE):
             "log_var": encoded["log_var"],
         }
 
-    def _gaussian_nll(self, x_hat: Tensor, x: Tensor):
-        nll = torch.pow((x - x_hat) / self.log_sigma.exp(), 2) / 2
-        nll = nll + self.log_sigma + 0.5 * math.log(2 * math.pi)
-        return nll
-
-    def _sech_nll(self, x_hat: Tensor, x: Tensor):
-        exp_term = math.pi * (x - x_hat) / (2.0 * self.log_sigma.exp())
-        nll = exp_term + torch.log(1 + torch.exp(-2 * exp_term))
-        nll = nll + self.log_sigma
-        return nll
-
     def loss_function(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
         device = next(self.parameters()).device
         x = data["input"]
@@ -161,9 +150,9 @@ class ConditionedVAE(BaseVAE):
         res_dict = {}
 
         if self.residual_type == "gaussian":
-            nll_loss = self._gaussian_nll(x_hat, x)
+            nll_loss = self._gaussian_nll(x_hat, x, self.log_sigma)
         else:
-            nll_loss = self._sech_nll(x_hat, x)
+            nll_loss = self._sech_nll(x_hat, x, self.log_sigma)
 
         nll_loss = nll_loss.flatten(start_dim=1).sum(dim=1)
         nll_loss = nll_loss.mean()
