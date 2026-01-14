@@ -2,7 +2,7 @@ model_params:
   name: "BetaVAE"
   latent_dim: 4
   loss_type: "B"
-  beta: 10
+  beta: 0.1
   encoder:
     in_channels: 3
     base_dim: 8
@@ -29,7 +29,6 @@ model_params:
     norm: "layer"
     activation: "silu"
     final_activation: "sigmoid"
-    upscale_out: True
 
 data_params:
   dataset: "celeba"
@@ -42,13 +41,12 @@ data_params:
 
 experiment_params:
   optim1:
-    lr: 0.005
+    lr: 0.0005
     weight_decay: 0.0
     warmup_epochs: 5
-    warmup_start_lr: 0.0001
-    eta_min: 0.0001
+    warmup_start_lr: 0.00005
+    eta_min: 0.00005
   manual_seed: 1265
-  max_epochs: 100
   metrics: ["lpips", "ssim", "psnr", "fid"]
 
 trainer_params:
@@ -57,7 +55,7 @@ trainer_params:
   precision: "32-true"
   gradient_clip_val: 5.0
   gradient_clip_algorithm: norm
-  max_epochs: 100
+  max_epochs: 50
 
 logging_params:
   save_dir: "logs/"

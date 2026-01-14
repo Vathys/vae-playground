@@ -1,13 +1,13 @@
 model_params:
   name: "ConditionedVAE"
   latent_dim: 4
-  cond_weight: 5
+  cond_weight: 10
   identity_model_path: "magface_r18.pth"
   residual_type: sech
   C_type: exp
-  gamma: 10
-  max_capacity: 50
-  C_stop_epoch: 60
+  gamma: 0.1
+  max_capacity: 600
+  C_stop_epoch: 400
   learn_log_sigma: False
   encoder:
     in_channels: 3
@@ -24,7 +24,7 @@ model_params:
     activation: "silu"
   mixer:
     scales: 1
-    num_blocks: 4
+    num_blocks: 8
     channel_multiplier: 1
     transpose: True
     kernel_size: 5
@@ -38,7 +38,7 @@ model_params:
   decoder:
     out_dim: 3
     scales: 3
-    num_blocks: 1
+    num_blocks: 2
     channel_multiplier: 0.5
     transpose: True
     kernel_size: 5
@@ -52,21 +52,19 @@ model_params:
 data_params:
   dataset: "celeba"
   data_path: "/mnt/ext-data-01/data"
-  train_batch_size: 64
-  val_batch_size: 64
-  patch_size: 64
+  train_batch_size: 48
+  val_batch_size: 48
+  patch_size: 256
   num_workers: 4
   pin_memory: True
 
 experiment_params:
   optim1:
-    lr: 0.0005
-    weight_decay: 0.0
-    warmup_epochs: 5
-    warmup_start_lr: 0.00005
-    eta_min: 0.00005
+    lr: 0.005
+    weight_decay: 0.001
+    warmup_epochs: 10
+    warmup_start_lr: 0.00001
   manual_seed: 1265
-  max_epochs: 100
   metrics: ["lpips", "ssim", "psnr", "fid"]
 
 trainer_params:
@@ -75,7 +73,7 @@ trainer_params:
   precision: "32-true"
   gradient_clip_val: 5.0
   gradient_clip_algorithm: norm
-  max_epochs: 100
+  max_epochs: 200
 
 logging_params:
   save_dir: "logs/"

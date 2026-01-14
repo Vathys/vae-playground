@@ -70,7 +70,6 @@ experiment_params:
     warmup_start_lr: 0.00005
     eta_min: 0.00005
   manual_seed: 1265
-  max_epochs: 100
   metrics: ["lpips", "ssim", "psnr", "fid"]
 
 trainer_params:

@@ -1,10 +1,10 @@
 from collections import Counter
-from typing import Dict
+from typing import Dict, Tuple
+from pprint import pprint
 
 import lightning as L
 import torch
 import torchvision.utils as vutils
-from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 from torch import Tensor, optim
 from torchmetrics.image.fid import FrechetInceptionDistance as FID
 from torchmetrics.image.inception import InceptionScore
@@ -16,12 +16,134 @@ from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure as SSIM
 from models import getVAE
 
 
+def kl_per_dim(mu: Tensor, log_var: Tensor):
+    return 0.5 * (mu.pow(2) + log_var.exp() - log_var - 1.0)
+
+
+def kl_stats(
+    mu: Tensor, log_var: Tensor, threshold=0.01
+) -> Tuple[Tensor, Tensor, Tensor]:
+    mu = mu.flatten(start_dim=1)  # flatten into [B, latent_dim]
+    log_var = log_var.flatten(start_dim=1)
+
+    kp = kl_per_dim(mu, log_var)
+    kp_mean = kp.mean(dim=0)
+    active = (kp_mean > threshold).sum()
+    mean_kl = kp_mean.mean()
+    mean_variance = log_var.exp().mean()
+
+    return active, mean_kl, mean_variance
+
+
+class Validator:
+    def __init__(self, metrics):
+        # Reconstruction Metrics
+        if "lpips" in metrics:
+            self.lpips = LPIPS(net_type="vgg").eval()
+        else:
+            self.lpips = None
+        if "ssim" in metrics:
+            self.ssim = SSIM(data_range=1.0).eval()
+        else:
+            self.ssim = None
+        if "psnr" in metrics:
+            self.psnr = PSNR(data_range=1.0).eval()
+        else:
+            self.psnr = None
+
+        # Generation Metrics
+        if "fid" in metrics:
+            self.fid = FID(feature=2048, normalize=True).eval()
+        else:
+            self.fid = None
+        if "kid" in metrics:
+            self.kid = KID(feature=2048, subset_size=50, normalize=True).eval()
+        else:
+            self.kid = None
+        if "inception_score" in metrics:
+            self.inception = InceptionScore(feature=2048, normalize=True).eval()
+        else:
+            self.inception = None
+
+    def to(self, device):
+        if self.ssim is not None:
+            self.ssim.to(device)
+
+        if self.lpips is not None:
+            self.lpips.to(device)
+
+        if self.psnr is not None:
+            self.psnr.to(device)
+
+        if self.fid is not None:
+            self.fid.to(device)
+
+        if self.kid is not None:
+            self.kid.to(device)
+
+        if self.inception is not None:
+            self.inception.to(device)
+
+    def validate(self, x_hat, x, mu, log_var):
+        res = {}
+
+        if self.ssim is not None:
+            res["ssim"] = self.ssim(x_hat, x)
+
+        if self.lpips is not None:
+            res["lpips"] = self.lpips(x_hat, x)
+
+        if self.psnr is not None:
+            res["psnr"] = self.psnr(x_hat, x)
+
+        active_dim, mean_kl, mean_variance = kl_stats(mu, log_var)
+
+        res["active_dim"] = active_dim.to(torch.float32)
+        res["mean_kl"] = mean_kl.to(torch.float32)
+        res["mean_variance"] = mean_variance.to(torch.float32)
+
+        return res
+
+    def update(self, x, real):
+        if self.fid is not None:
+            self.fid.update(x, real)
+
+        if self.kid is not None:
+            self.kid.update(x, real)
+
+        if self.inception is not None and not real:
+            self.inception.update(x)
+
+    def compute(self):
+        res = {}
+
+        if self.fid is not None:
+            fid_val = self.fid.compute()
+            res["fid"] = fid_val
+            self.fid.reset()
+
+        if self.kid is not None:
+            kid_mean, kid_std = self.kid.compute()
+            res["kid_mean"] = kid_mean
+            res["kid_std"] = kid_std
+            self.kid.reset()
+
+        if self.inception is not None:
+            is_mean, is_std = self.inception.compute()
+            res["inception_score_mean"] = is_mean
+            res["inception_score_std"] = is_std
+            self.inception.reset()
+
+        return res
+
+
 class VAEExperiment(L.LightningModule):
     def __init__(self, model_params, experiment_params) -> None:
         super().__init__()
 
-        self.model = getVAE(model_params["name"], **model_params)
         self.params = experiment_params
+        self.model_params = model_params
+        self.model = getVAE(self.model_params["name"], **self.model_params)
 
         self.test_input = None
 
@@ -30,35 +152,7 @@ class VAEExperiment(L.LightningModule):
 
         self.val_cond_norms = []
 
-        # Validation Models
-
-        # Reconstruction Metrics
-        if "lpips" in experiment_params["metrics"]:
-            self.lpips = LPIPS(net_type="vgg").eval()
-        else:
-            self.lpips = None
-        if "ssim" in experiment_params["metrics"]:
-            self.ssim = SSIM(data_range=1.0).eval()
-        else:
-            self.ssim = None
-        if "psnr" in experiment_params["metrics"]:
-            self.psnr = PSNR(data_range=1.0).eval()
-        else:
-            self.psnr = None
-
-        # Generation Metrics
-        if "fid" in experiment_params["metrics"]:
-            self.fid = FID(feature=2048, normalize=True).eval()
-        else:
-            self.fid = None
-        if "kid" in experiment_params["metrics"]:
-            self.kid = KID(feature=2048, subset_size=50, normalize=True).eval()
-        else:
-            self.kid = None
-        if "inception_score" in experiment_params["metrics"]:
-            self.inception = InceptionScore(feature=2048, normalize=True).eval()
-        else:
-            self.inception = None
+        self.validator = Validator(experiment_params["metrics"])
 
         self.save_hyperparameters()
 
@@ -67,7 +161,15 @@ class VAEExperiment(L.LightningModule):
         return {f"model.{key}": val for key, val in state_dict.items()}
 
     def on_train_start(self):
-        self.model.to(self.device)
+        print("--------------------------")
+        print("Model Parameters")
+        print("--------------------------")
+        pprint(self.model_params)
+
+        print("--------------------------")
+        print("Experiment Parameters")
+        print("--------------------------")
+        pprint(self.params)
 
     def forward(self, data) -> Dict[str, Tensor]:
         return self.model(data)
@@ -141,44 +243,28 @@ class VAEExperiment(L.LightningModule):
 
         x = results["input"]
         x_hat = results["output"]
+        mu = results["mu"]
+        log_var = results["log_var"]
 
-        if self.ssim is not None:
-            self.log("val/metrics/ssim", self.ssim(x_hat, x), sync_dist=True)
-        if self.lpips is not None:
-            self.log("val/metrics/lpips", self.lpips(x_hat, x), sync_dist=True)
-        if self.psnr is not None:
-            self.log("val/metrics/psnr", self.psnr(x_hat, x), sync_dist=True)
+        self.validator.to(self.device)
+        metrics = self.validator.validate(x_hat, x, mu, log_var)
 
-        if self.fid is not None:
-            self.fid.update(x, real=True)
-            self.fid.update(x_hat, real=False)
+        self.log_dict(
+            {f"val/metrics/{key}": val for key, val in metrics.items()}, sync_dist=True
+        )
 
-        if self.kid is not None:
-            self.kid.update(x, real=True)
-            self.kid.update(x_hat, real=False)
-
-        if self.inception is not None:
-            self.inception.update(x_hat)
+        self.validator.update(x, real=True)
+        self.validator.update(x_hat, real=False)
 
         return val_loss
 
     def on_validation_epoch_end(self):
-        if self.fid is not None:
-            fid_val = self.fid.compute()
-            self.log("val/metrics/fid", fid_val, sync_dist=True)
-            self.fid.reset()
+        self.validator.to(self.device)
+        metrics = self.validator.compute()
 
-        if self.kid is not None:
-            kid_mean, kid_std = self.kid.compute()
-            self.log("val/metrics/kid_mean", kid_mean, sync_dist=True)
-            self.log("val/metrics/kid_std", kid_std, sync_dist=True)
-            self.kid.reset()
-
-        if self.inception is not None:
-            is_mean, is_std = self.inception.compute()
-            self.log("val/metrics/inception_score_mean", is_mean, sync_dist=True)
-            self.log("val/metrics/inception_score_std", is_std, sync_dist=True)
-            self.inception.reset()
+        self.log_dict(
+            {f"val/metrics/{key}": val for key, val in metrics.items()}, sync_dist=True
+        )
 
         res_tensor = torch.tensor(
             self.val_batch_resolutions, dtype=torch.int, device=self.device
@@ -254,32 +340,29 @@ class VAEExperiment(L.LightningModule):
                 if "submodel" in optim_params
                 else self.model
             )
-            optimizer = optim.Adam(
+            optimizer = optim.AdamW(
                 model.parameters(),
                 lr=optim_params["lr"],
                 weight_decay=optim_params["weight_decay"],
             )
 
-            scheduler = LinearWarmupCosineAnnealingLR(
+            # Use Linear LR as warmup and keep constant
+            scheduler = optim.lr_scheduler.LinearLR(
                 optimizer,
-                warmup_epochs=optim_params["warmup_epochs"],
-                max_epochs=optim_params["max_epochs"],
-                warmup_start_lr=optim_params["warmup_start_lr"],
-                eta_min=optim_params["eta_min"],
+                start_factor=optim_params["warmup_start_lr"],
+                end_factor=optim_params["lr"],
+                total_iters=optim_params["warmup_epochs"],
+                last_epoch=-1,
             )
 
             return optimizer, scheduler
 
-        optimizer1, scheduler1 = get_optimizer(
-            **self.params["optim1"], max_epochs=self.params["max_epochs"]
-        )
+        optimizer1, scheduler1 = get_optimizer(**self.params["optim1"])
         optims.append(optimizer1)
         scheds.append(scheduler1)
 
         if "optim2" in self.params and self.params["optim2"] is not None:
-            optimizer2, scheduler2 = get_optimizer(
-                **self.params["optim2"], max_epochs=self.params["max_epochs"]
-            )
+            optimizer2, scheduler2 = get_optimizer(**self.params["optim2"])
             optims.append(optimizer2)
             scheds.append(scheduler2)
 
