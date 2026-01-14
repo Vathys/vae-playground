@@ -112,7 +112,7 @@ class CelebAMaskHQDataset(Dataset):
         self.transform = transform
         self.split = split
 
-        list_file = self.data_path / ("train.txt" if split == "train" else "test.txt")
+        list_file = self.data_path / f"{split}.txt"
         images_dir = self.data_path / "CelebA-HQ-img"
 
         with open(list_file, "r", encoding="utf-8") as f:
@@ -196,6 +196,10 @@ class VAEDataset(L.LightningDataModule):
             )
 
             self.val_dataset = CelebADataset(
+                self.data_dir, split="val", transform=self.val_transform
+            )
+
+            self.test_dataset = CelebADataset(
                 self.data_dir, split="test", transform=self.val_transform
             )
         elif self.dataset == "celebamask_hq":
@@ -204,6 +208,10 @@ class VAEDataset(L.LightningDataModule):
             )
 
             self.val_dataset = CelebAMaskHQDataset(
+                self.data_dir, split="val", transform=self.val_transform
+            )
+
+            self.test_dataset = CelebAMaskHQDataset(
                 self.data_dir, split="test", transform=self.val_transform
             )
         else:
@@ -211,7 +219,10 @@ class VAEDataset(L.LightningDataModule):
 
     def train_dataloader(self):
         def train_worker_init_fn(worker_id):
-            current_epoch = self.trainer.current_epoch
+            if self.trainer is not None:
+                current_epoch = self.trainer.current_epoch
+            else:
+                current_epoch = 0
 
             worker_seed = (self.seed + worker_id + current_epoch) % (2**32)
             torch.manual_seed(worker_seed)
@@ -259,4 +270,4 @@ class VAEDataset(L.LightningDataModule):
             "pin_memory": self.pin_memory,
             "worker_init_fn": test_worker_init_fn,
         }
-        return DataLoader(self.val_dataset, **dl_kwargs)
+        return DataLoader(self.test_dataset, **dl_kwargs)
