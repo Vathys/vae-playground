@@ -14,7 +14,10 @@ from utils import combine_dict, lerp_z, slerp_z, split_dict
 
 class ConditionedVAE(BaseVAE):
     def __init__(self, **kwargs):
-        super().__init__()
+        super().__init__(
+            use_lpips=kwargs.get("use_lpips", False),
+            lpips_weight=kwargs.get("lpips_weight", 1.0),
+        )
         self.latent_dim = kwargs["latent_dim"]
         self.cond_weight = kwargs["cond_weight"]
 
@@ -32,7 +35,6 @@ class ConditionedVAE(BaseVAE):
         for param in self.identity_model.parameters():
             param.requires_grad = False
 
-        self.identity_model = self.identity_model
         self.id_dim = 512
 
         enc_cfg = kwargs["encoder"]

@@ -11,7 +11,10 @@ from utils import combine_dict, lerp_z, split_dict
 
 class VanillaVAE(BaseVAE):
     def __init__(self, **kwargs):
-        super().__init__()
+        super().__init__(
+            use_lpips=kwargs.get("use_lpips", False),
+            lpips_weight=kwargs.get("lpips_weight", 1.0),
+        )
         self.latent_dim = kwargs["latent_dim"]
 
         enc_cfg = kwargs["encoder"]

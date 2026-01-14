@@ -25,11 +25,6 @@ def concat_coords(x):
     return torch.cat([coords, x], dim=1)
 
 
-class Identity(nn.Module):
-    def forward(self, x):
-        return x
-
-
 class AdaIN(nn.Module):
     def __init__(self, in_dim, cond_dim):
         super().__init__()
@@ -144,11 +139,11 @@ class WeightNormConv2d(nn.Module):
         kernel_size,
         stride=1,
         padding=0,
-        output_padding=0,
         bias=True,
         weight_norm=True,
         scale=False,
         transpose=False,
+        upsample_mode="nearest",
     ):
         """Intializes a Conv2d augmented with weight normalization.
 
@@ -160,12 +155,10 @@ class WeightNormConv2d(nn.Module):
             kernel_size: size of convolving kernel.
             stride: stride of convolution.
             padding: zero-padding added to both sides of input.
-            output_padding: for inferring output shape
-              (only for transposed convolution).
             bias: True if include learnable bias parameters, False otherwise.
             weight_norm: True if apply weight normalization, False otherwise.
             scale: True if include magnitude parameters, False otherwise.
-            transpose: True if transposed convolution, False otherwise.
+            transpose: True if upsample before applying convolution, False otherwise.
         """
         super(WeightNormConv2d, self).__init__()
 
@@ -176,18 +169,23 @@ class WeightNormConv2d(nn.Module):
                 return module
 
         if transpose:
+            self.upsample = (
+                nn.Identity()
+                if stride == 1
+                else nn.Upsample(scale_factor=stride, mode=upsample_mode)
+            )
             self.conv = norm_func(
-                nn.ConvTranspose2d(
+                nn.Conv2d(
                     in_dim,
                     out_dim,
                     kernel_size,
-                    stride=stride,
+                    stride=1,
                     padding=padding,
-                    output_padding=output_padding,
                     bias=bias,
                 )
             )
         else:
+            self.upsample = nn.Identity()
             self.conv = norm_func(
                 nn.Conv2d(
                     in_dim,
@@ -207,12 +205,13 @@ class WeightNormConv2d(nn.Module):
         Returns:
             transformed tensor.
         """
+        x = self.upsample(x)
         return self.conv(x)
 
 
 class Block(nn.Module):
     ACTIVATIONS = {
-        "none": lambda dim: Identity(),
+        "none": lambda dim: nn.Identity(),
         "relu": lambda dim: nn.ReLU(),
         "prelu": lambda dim: nn.PReLU(dim),
         "prelu1": lambda dim: nn.PReLU(1),
@@ -226,7 +225,7 @@ class Block(nn.Module):
     }
 
     NORMS = {
-        "none": lambda dim: Identity(),
+        "none": lambda dim: nn.Identity(),
         "batch": lambda dim: nn.BatchNorm2d(dim),
         "layer": lambda dim: nn.GroupNorm(1, dim),
         "instance": lambda dim: nn.GroupNorm(dim, dim),
@@ -239,7 +238,6 @@ class Block(nn.Module):
         kernel_size,
         stride=1,
         padding=0,
-        output_padding=0,
         bias=True,
         weight_norm=True,
         scale=False,
@@ -255,13 +253,13 @@ class Block(nn.Module):
             in_dim,
             out_dim,
             kernel_size,
-            stride,
-            padding,
-            output_padding,
-            bias,
-            weight_norm,
-            scale,
-            transpose,
+            stride=stride,
+            padding=padding,
+            bias=bias,
+            weight_norm=weight_norm,
+            scale=scale,
+            transpose=transpose,
+            upsample_mode="bilinear",
         )
 
         if norm in self.NORMS.keys():
@@ -642,7 +640,6 @@ def build_network(cfg: NetworkConfig) -> Tuple[nn.Module, int]:
             (ksize, ksize),
             stride=2,
             padding=ksize // 2,
-            output_padding=1 if transpose else 0,
             bias=True,
             weight_norm=block_wn,
             scale=True,
@@ -666,7 +663,6 @@ def build_network(cfg: NetworkConfig) -> Tuple[nn.Module, int]:
             kernel_size=(ksize, ksize),
             stride=2,
             padding=ksize // 2,
-            output_padding=1,
             bias=True,
             weight_norm=weight_norm[-1],
             scale=False,

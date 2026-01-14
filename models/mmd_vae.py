@@ -11,7 +11,10 @@ from utils import combine_dict, lerp_z, split_dict
 
 class MMDVAE(BaseVAE):
     def __init__(self, **kwargs):
-        super().__init__()
+        super().__init__(
+            use_lpips=kwargs.get("use_lpips", False),
+            lpips_weight=kwargs.get("lpips_weight", 1.0),
+        )
         self.latent_dim = kwargs["latent_dim"]
         self.kernel_type = kwargs.get("kernel_type", "imq")
         self.kernel_scales = kwargs.get(

@@ -12,7 +12,10 @@ from utils import combine_dict, lerp_z, split_dict
 
 class BetaVAE(BaseVAE):
     def __init__(self, **kwargs):
-        super().__init__()
+        super().__init__(
+            use_lpips=kwargs.get("use_lpips", False),
+            lpips_weight=kwargs.get("lpips_weight", 1.0),
+        )
         self.latent_dim = kwargs["latent_dim"]
         self.loss_type = kwargs["loss_type"]
         self.beta = kwargs.get("beta", None)

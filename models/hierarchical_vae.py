@@ -12,7 +12,10 @@ from utils import lerp_z
 
 class HierarchicalVAE(BaseVAE):
     def __init__(self, **kwargs):
-        super().__init__()
+        super().__init__(
+            use_lpips=kwargs.get("use_lpips", False),
+            lpips_weight=kwargs.get("lpips_weight", 1.0),
+        )
         self.latent1_dim = kwargs["latent_dim1"]
         self.latent2_dim = kwargs["latent_dim2"]
 
