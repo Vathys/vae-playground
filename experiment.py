@@ -349,8 +349,8 @@ class VAEExperiment(L.LightningModule):
             # Use Linear LR as warmup and keep constant
             scheduler = optim.lr_scheduler.LinearLR(
                 optimizer,
-                start_factor=optim_params["warmup_start_lr"],
-                end_factor=optim_params["lr"],
+                start_factor=0.1,
+                end_factor=1.0,
                 total_iters=optim_params["warmup_epochs"],
                 last_epoch=-1,
             )
