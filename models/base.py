@@ -2,10 +2,10 @@ import math
 from abc import abstractmethod
 from typing import Dict, List, Sequence, Tuple, Union
 
+import lpips
 import torch
 import torch.nn as nn
 from torch import Tensor
-import lpips
 
 
 class BaseVAE(nn.Module):
@@ -48,7 +48,9 @@ class BaseVAE(nn.Module):
         pass
 
     @abstractmethod
-    def loss_function(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
+    def loss_function(
+        self, data: Dict[str, Tensor], stage: str | None = None
+    ) -> Dict[str, Tensor]:
         pass
 
     def _gaussian_nll(self, x_hat: Tensor, x: Tensor, log_sigma: Tensor):

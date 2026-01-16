@@ -23,7 +23,8 @@ val_set = random.sample(rest, TEST_NUM)
 train_set = list(set(rest) - set(val_set))
 
 print(
-    f"Splitting into {TEST_NUM} test samples, {VAL_NUM} validation samples and {TRAIN_NUM} train samples..."
+    f"Splitting into {TEST_NUM} test samples, {VAL_NUM} validation samples "
+    "and {TRAIN_NUM} train samples..."
 )
 
 with open(DATA_PATH / "CelebAMask-HQ" / "test.txt", "w", encoding="utf-8") as f:

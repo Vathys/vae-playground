@@ -156,7 +156,9 @@ class HierarchicalVAE(BaseVAE):
             "prior_log_var": decoded["prior_log_var"],
         }
 
-    def loss_function(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
+    def loss_function(
+        self, data: Dict[str, Tensor], stage: str | None = None
+    ) -> Dict[str, Tensor]:
         x = data["input"]
         x_hat = data["output"]
         mu1 = data["mu"][0].flatten(start_dim=1)

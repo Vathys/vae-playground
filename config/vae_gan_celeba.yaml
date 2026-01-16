@@ -1,6 +1,8 @@
 model_params:
-  name: "LogCoshVAE"
+  name: "VAEGAN"
   latent_dim: 4
+  adversarial_weight: 0.5
+  feature_matching_weight: 0
   encoder:
     in_channels: 3
     base_dim: 8
@@ -27,7 +29,20 @@ model_params:
     norm: "layer"
     activation: "silu"
     final_activation: "sigmoid"
-    upscale_out: True
+  discriminator:
+    in_channels: 3
+    base_dim: 4
+    out_dim: 1
+    scales: 5
+    num_blocks: 1
+    channel_multiplier: 2
+    transpose: False
+    kernel_size: 5
+    residual: True
+    bottleneck: True
+    weight_norm: False
+    norm: "batch"
+    activation: "silu"
 
 data_params:
   dataset: "celeba"
@@ -40,6 +55,12 @@ data_params:
 
 experiment_params:
   optim1:
+    submodel: generator
+    lr: 0.0005
+    weight_decay: 0.001
+    warmup_epochs: 5
+  optim2:
+    submodel: discriminator
     lr: 0.0005
     weight_decay: 0.001
     warmup_epochs: 5
@@ -57,4 +78,4 @@ trainer_params:
 
 logging_params:
   save_dir: "logs/"
-  name: "LogCoshVAE"
+  name: "VAEGAN"

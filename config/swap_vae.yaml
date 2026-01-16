@@ -1,28 +1,34 @@
 model_params:
   name: "SwapVAE"
-  latent_dim: 4
-  gamma: 10
-  max_capacity: 60
-  C_stop_epoch: 140
+  latent_dim: 8
+  residual_type: sech
+  use_beta: False
+  use_lpips: False
+  anneal_stop_epoch: 60
+  gamma: 0.1
+  max_capacity: 50
   lpips_weight: 400
   encoder:
     in_channels: 3
     base_dim: 8
-    scales: 4
+    scales: [1, 2, 2, 1]
     num_blocks: 1
     channel_multiplier: 2
+    transpose: False
+    kernel_size: 5
     residual: True
-    bottleneck: True
+    bottleneck: False
     weight_norm: False
     norm: "layer"
     activation: "silu"
   decoder:
-    out_channels: 3
-    scales: 4
+    out_dim: 3
+    scales: [1, 2, 2, 1]
     num_blocks: 1
-    channel_multiplier: 0.5
+    transpose: True
+    kernel_size: 5
     residual: True
-    bottleneck: True
+    bottleneck: False
     weight_norm: False
     norm: "layer"
     activation: "silu"
@@ -31,29 +37,28 @@ model_params:
 data_params:
   dataset: "celeba"
   data_path: "/mnt/ext-data-01/data"
-  train_batch_size: 64
-  val_batch_size: 64
-  patch_size: 64
+  train_batch_size: 16
+  val_batch_size: 16
+  patch_size: 256
   num_workers: 4
   pin_memory: True
 
 experiment_params:
   optim1:
     lr: 0.0005
-    weight_decay: 0.0
+    weight_decay: 0.001
     warmup_epochs: 5
-    warmup_start_lr: 0.00005
-    eta_min: 0.00005
   manual_seed: 1265
-  max_epochs: 200
-  test_latent_size: [4, 4]
+  metrics: ["lpips", "ssim", "psnr", "fid"]
+  clip_gradient: True
+  gradient_clip_val: 5.0
+  gradient_clip_algorithm: norm
 
 trainer_params:
   devices: 1
   strategy: "ddp"
   precision: "32-true"
-  gradient_clip_val: 5.0
-  gradient_clip_algorithm: norm
+  max_epochs: 100
 
 logging_params:
   save_dir: "logs/"

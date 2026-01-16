@@ -145,7 +145,9 @@ class MMDVAE(BaseVAE):
 
         return mmd
 
-    def loss_function(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
+    def loss_function(
+        self, data: Dict[str, Tensor], stage: str | None = None
+    ) -> Dict[str, Tensor]:
         x = data["input"]
         x_hat = data["output"]
         mu = data["mu"].flatten(start_dim=1)

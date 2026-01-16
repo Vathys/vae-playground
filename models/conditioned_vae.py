@@ -134,7 +134,9 @@ class ConditionedVAE(BaseVAE):
             "log_var": encoded["log_var"],
         }
 
-    def loss_function(self, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
+    def loss_function(
+        self, data: Dict[str, Tensor], stage: str | None = None
+    ) -> Dict[str, Tensor]:
         device = next(self.parameters()).device
         x = data["input"]
         x_hat = data["output"]

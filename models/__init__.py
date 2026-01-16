@@ -6,6 +6,7 @@ from models.hierarchical_vae import HierarchicalVAE
 from models.logcosh_vae import LogCoshVAE
 from models.mmd_vae import MMDVAE
 from models.sigma_vae import SigmaVAE
+from models.vae_gan import VAEGAN
 from models.vanilla_vae import VanillaVAE
 
 vae_models = {
@@ -17,6 +18,7 @@ vae_models = {
     "MMDVAE": MMDVAE,
     "LogCoshVAE": LogCoshVAE,
     "SigmaVAE": SigmaVAE,
+    "VAEGAN": VAEGAN,
 }
 
 

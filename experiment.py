@@ -1,6 +1,6 @@
 from collections import Counter
-from typing import Dict, Tuple
 from pprint import pprint
+from typing import Dict, Tuple
 
 import lightning as L
 import torch
@@ -155,6 +155,7 @@ class VAEExperiment(L.LightningModule):
         self.validator = Validator(experiment_params["metrics"])
 
         self.save_hyperparameters()
+        self.automatic_optimization = False
 
     def state_dict(self):
         state_dict = self.model.state_dict()
@@ -175,11 +176,20 @@ class VAEExperiment(L.LightningModule):
         return self.model(data)
 
     def training_step(self, batch, batch_idx):
+        optim = self.optimizers()
+
+        if not isinstance(optim, list):
+            optim = [optim]
+
         _, _, H, W = batch["input"].shape
         if H > W:
             self.train_batch_resolutions.append(H)
         else:
             self.train_batch_resolutions.append(W)
+
+        assert len(optim) < 3, "Only 2 stage optimization supported"
+
+        optim[0].zero_grad()
 
         results = self.forward(batch)
 
@@ -188,18 +198,61 @@ class VAEExperiment(L.LightningModule):
 
         train_loss = self.model.loss_function(results)
 
+        self.manual_backward(train_loss["loss"])
+        if self.params["clip_gradient"]:
+            self.clip_gradients(
+                optim[0],
+                gradient_clip_val=self.params["gradient_clip_val"],
+                gradient_clip_algorithm=self.params["gradient_clip_algorithm"],
+            )
+        optim[0].step()
+
         self.log_dict(
             {f"train/{key}": val.item() for key, val in train_loss.items()},
             sync_dist=True,
         )
 
-        return train_loss
+        if len(optim) > 1:
+            optim[1].zero_grad()
+
+            results = self.forward(batch)
+
+            results["global_step"] = self.global_step
+            results["current_epoch"] = self.current_epoch
+
+            train_loss_2 = self.model.loss_function(results, stage="2")
+
+            self.manual_backward(train_loss_2["loss"])
+            if self.params["clip_gradient"]:
+                self.clip_gradients(
+                    optim[1],
+                    gradient_clip_val=self.params["gradient_clip_val"],
+                    gradient_clip_algorithm=self.params["gradient_clip_algorithm"],
+                )
+            optim[1].step()
+
+            self.log_dict(
+                {
+                    f"train/stage2/{key}": val.item()
+                    for key, val in train_loss_2.items()
+                },
+                sync_dist=True,
+            )
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
         if batch_idx == 0:
             self.log_grads()
 
     def on_train_epoch_end(self):
+        schs = self.lr_schedulers()
+
+        if schs is not None:
+            if not isinstance(schs, list):
+                schs = [schs]
+
+            for sch in schs:
+                sch.step()
+
         res_tensor = torch.tensor(
             self.train_batch_resolutions, dtype=torch.int, device=self.device
         )
@@ -217,6 +270,13 @@ class VAEExperiment(L.LightningModule):
         self.train_batch_resolutions.clear()
 
     def validation_step(self, batch, batch_idx):
+        optimizers = self.optimizers()
+
+        if isinstance(optimizers, list) and len(optimizers) > 1:
+            has_stage2 = True
+        else:
+            has_stage2 = False
+
         _, _, H, W = batch["input"].shape
         if H > W:
             self.val_batch_resolutions.append(H)
@@ -234,8 +294,17 @@ class VAEExperiment(L.LightningModule):
         val_loss = self.model.loss_function(results)
 
         self.log_dict(
-            {f"val/{key}": val.item() for key, val in val_loss.items()}, sync_dist=True
+            {f"val/{key}": val.item() for key, val in val_loss.items()},
+            sync_dist=True,
         )
+
+        if has_stage2:
+            val_loss_2 = self.model.loss_function(results, stage="2")
+
+            self.log_dict(
+                {f"val/stage2/{key}": val.item() for key, val in val_loss_2.items()},
+                sync_dist=True,
+            )
 
         if "cond" in results:
             cond_norms = results["cond"].norm(dim=1)
@@ -255,8 +324,6 @@ class VAEExperiment(L.LightningModule):
 
         self.validator.update(x, real=True)
         self.validator.update(x_hat, real=False)
-
-        return val_loss
 
     def on_validation_epoch_end(self):
         self.validator.to(self.device)
