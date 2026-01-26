@@ -18,8 +18,10 @@ class VAEGAN(BaseVAE):
         )
         self.latent_dim = kwargs["latent_dim"]
 
-        self.adversarial_weight = kwargs.get("adversarial_weight", 1.0)
-        self.feature_matching_weight = kwargs.get("feature_matching_weight", 0.0)
+        self.adv_weight = kwargs.get("adversarial_weight", 1.0)
+        self.fm_weight = kwargs.get("feature_matching_weight", 0.0)
+        self.instance_noise_factor = kwargs.get("instance_noise_factor", 0.1)
+        self.label_smooth_factor = kwargs.get("label_smooth_factor", 0.1)
 
         enc_cfg = kwargs["encoder"]
         dec_cfg = kwargs["decoder"]
@@ -39,7 +41,9 @@ class VAEGAN(BaseVAE):
         self.decoder, _ = build_network(dec_cfg)
 
         # Used only for setting optimizer parameters
-        self.generator = nn.ModuleList([self.encoder, self.decoder])
+        self.generator = nn.ModuleList(
+            [self.encoder, self.fc_mu, self.fc_var, self.decoder]
+        )
 
         disc_cfg = kwargs["discriminator"]
 
@@ -129,17 +133,16 @@ class VAEGAN(BaseVAE):
     ) -> Dict[str, Tensor]:
         x = data["input"]
         x_hat = data["output"]
-        mu = data["mu"].flatten(start_dim=1)
-        log_var = data["log_var"].flatten(start_dim=1)
-        d_real = data["d_real"]
-        d_fake = data["d_fake"]
-        real_features = data["real_features"]
-        fake_features = data["fake_features"]
 
         res_dict = {}
 
         if stage is None or stage == "1":
+            mu = data["mu"].flatten(start_dim=1)
+            log_var = data["log_var"].flatten(start_dim=1)
             log_sigma = torch.tensor([0.0], device=self.device)
+
+            fake_out = self.discriminate(x_hat)
+            d_fake = fake_out["logits"]
 
             nll_loss = self._gaussian_nll(x_hat, x, log_sigma)
             nll_loss = nll_loss.flatten(start_dim=1).sum(dim=1)
@@ -154,11 +157,16 @@ class VAEGAN(BaseVAE):
             adv_loss = F.binary_cross_entropy_with_logits(
                 d_fake, real_labels, reduction="none"
             )
+            adv_loss = adv_loss
             adv_loss = adv_loss.mean()
             res_dict["adv_loss"] = adv_loss.detach()
 
             fm_loss = torch.zeros(x.size(0), device=self.device)
-            if self.feature_matching_weight > 0:
+            if self.fm_weight > 0:
+                real_out = self.discriminate(x)
+                real_features = real_out["features"]
+                fake_features = fake_out["features"]
+
                 for real_feat, fake_feat in zip(real_features, fake_features):
                     feat_loss = F.mse_loss(
                         fake_feat, real_feat.detach(), reduction="none"
@@ -169,21 +177,40 @@ class VAEGAN(BaseVAE):
                 res_dict["fm_loss"] = fm_loss.detach()
 
             loss = (
-                nll_loss
+                (1 - self.adv_weight) * nll_loss
                 + kld_loss
-                + self.adversarial_weight * adv_loss
-                + self.feature_matching_weight * fm_loss
+                + self.adv_weight * adv_loss
+                + self.fm_weight * fm_loss
             )
             loss = loss.mean()
             res_dict["loss"] = loss
 
             res_dict["elbo"] = -loss.detach()
         elif stage == "2":
-            label_smooth = 0.1
-            real_labels = torch.full_like(
-                d_real, (1 - label_smooth) + label_smooth * 0.5
+            # Instance Noise
+            noisy_x = (
+                x
+                + torch.randn_like(x, device=self.device, requires_grad=False)
+                * self.instance_noise_factor
             )
-            fake_labels = torch.full_like(d_fake, label_smooth * 0.5)
+            noisy_x_hat = (
+                x_hat
+                + torch.randn_like(x_hat, device=self.device, requires_grad=False)
+                * self.instance_noise_factor
+            )
+
+            real_out = self.discriminate(noisy_x)
+            fake_out = self.discriminate(noisy_x_hat)
+            d_fake = fake_out["logits"]
+            d_real = real_out["logits"]
+
+            # Label Smoothing
+            smoother = (
+                torch.rand_like(d_real, device=self.device, requires_grad=False)
+                * self.label_smooth_factor
+            )
+            real_labels = (1 - smoother) + smoother * 0.5
+            fake_labels = smoother * 0.5
 
             d_real_loss = F.binary_cross_entropy_with_logits(
                 d_real, real_labels, reduction="none"

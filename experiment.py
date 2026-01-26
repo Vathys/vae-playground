@@ -189,70 +189,80 @@ class VAEExperiment(L.LightningModule):
 
         assert len(optim) < 3, "Only 2 stage optimization supported"
 
-        optim[0].zero_grad()
+        with self.toggled_optimizer(optim[0]):
 
-        results = self.forward(batch)
+            def closure():
+                optim[0].zero_grad()
+                results = self.forward(batch)
 
-        results["global_step"] = self.global_step
-        results["current_epoch"] = self.current_epoch
+                results["global_step"] = self.global_step
+                results["current_epoch"] = self.current_epoch
 
-        train_loss = self.model.loss_function(results)
+                train_loss = self.model.loss_function(results)
 
-        self.manual_backward(train_loss["loss"])
-        if self.params["clip_gradient"]:
-            self.clip_gradients(
-                optim[0],
-                gradient_clip_val=self.params["gradient_clip_val"],
-                gradient_clip_algorithm=self.params["gradient_clip_algorithm"],
-            )
-        optim[0].step()
+                self.manual_backward(train_loss["loss"])
+                if self.params["clip_gradient"]:
+                    self.clip_gradients(
+                        optim[0],
+                        gradient_clip_val=self.params["gradient_clip_val"],
+                        gradient_clip_algorithm=self.params["gradient_clip_algorithm"],
+                    )
 
-        self.log_dict(
-            {f"train/{key}": val.item() for key, val in train_loss.items()},
-            sync_dist=True,
-        )
+                self.log_dict(
+                    {
+                        f"train/{key}": val.detach().item()
+                        for key, val in train_loss.items()
+                    },
+                    sync_dist=True,
+                )
+
+            optim[0].step(closure)
 
         if len(optim) > 1:
-            optim[1].zero_grad()
+            with self.toggled_optimizer(optim[1]):
 
-            results = self.forward(batch)
+                def closure():
+                    optim[1].zero_grad()
+                    results = self.forward(batch)
 
-            results["global_step"] = self.global_step
-            results["current_epoch"] = self.current_epoch
+                    results["global_step"] = self.global_step
+                    results["current_epoch"] = self.current_epoch
 
-            train_loss_2 = self.model.loss_function(results, stage="2")
+                    train_loss_2 = self.model.loss_function(results, stage="2")
 
-            self.manual_backward(train_loss_2["loss"])
-            if self.params["clip_gradient"]:
-                self.clip_gradients(
-                    optim[1],
-                    gradient_clip_val=self.params["gradient_clip_val"],
-                    gradient_clip_algorithm=self.params["gradient_clip_algorithm"],
-                )
-            optim[1].step()
+                    self.manual_backward(train_loss_2["loss"])
+                    if self.params["clip_gradient"]:
+                        self.clip_gradients(
+                            optim[1],
+                            gradient_clip_val=self.params["gradient_clip_val"],
+                            gradient_clip_algorithm=self.params[
+                                "gradient_clip_algorithm"
+                            ],
+                        )
 
-            self.log_dict(
-                {
-                    f"train/stage2/{key}": val.item()
-                    for key, val in train_loss_2.items()
-                },
-                sync_dist=True,
-            )
+                    self.log_dict(
+                        {
+                            f"train/stage2/{key}": val.detach().item()
+                            for key, val in train_loss_2.items()
+                        },
+                        sync_dist=True,
+                    )
 
-    def on_train_batch_end(self, outputs, batch, batch_idx):
-        if batch_idx == 0:
+                optim[1].step(closure)
+
+        if self.trainer.is_last_batch:
+            schs = self.lr_schedulers()
+
+            if schs is not None:
+                if not isinstance(schs, list):
+                    schs = [schs]
+
+                for sch in schs:
+                    sch.step()
+
             self.log_grads()
 
     def on_train_epoch_end(self):
-        schs = self.lr_schedulers()
-
-        if schs is not None:
-            if not isinstance(schs, list):
-                schs = [schs]
-
-            for sch in schs:
-                sch.step()
-
         res_tensor = torch.tensor(
             self.train_batch_resolutions, dtype=torch.int, device=self.device
         )
@@ -378,6 +388,7 @@ class VAEExperiment(L.LightningModule):
 
     def sample_images(self):
         output = self.model.forward(self.test_input)["output"]
+        output = (output + 1.0) * 0.5
         grid = vutils.make_grid(output, nrow=6)
         self.logger.experiment.add_image("reconstruction", grid, self.global_step)
 
@@ -392,7 +403,8 @@ class VAEExperiment(L.LightningModule):
         )
 
         for i, interp in enumerate(interp_list):
-            grid = vutils.make_grid(interp["output"], nrow=6)
+            interp_out = (interp["output"] + 1.0) * 0.5
+            grid = vutils.make_grid(interp_out, nrow=6)
             self.logger.experiment.add_image(
                 f"interpolated {i}", grid, self.global_step
             )
