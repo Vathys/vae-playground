@@ -2,7 +2,9 @@ model_params:
   name: "VAEGAN"
   latent_dim: 4
   adversarial_weight: 0.5
-  feature_matching_weight: 0
+  feature_matching_weight: 0.2
+  instance_noise_factor: 0
+  label_smooth_factor: 0.3
   encoder:
     in_channels: 3
     base_dim: 8
@@ -28,12 +30,12 @@ model_params:
     weight_norm: False
     norm: "layer"
     activation: "silu"
-    final_activation: "sigmoid"
+    final_activation: "tanh"
   discriminator:
     in_channels: 3
     base_dim: 4
     out_dim: 1
-    scales: 5
+    scales: 4
     num_blocks: 1
     channel_multiplier: 2
     transpose: False
@@ -41,7 +43,7 @@ model_params:
     residual: True
     bottleneck: True
     weight_norm: False
-    norm: "batch"
+    norm: "instance"
     activation: "silu"
 
 data_params:
@@ -61,8 +63,8 @@ experiment_params:
     warmup_epochs: 5
   optim2:
     submodel: discriminator
-    lr: 0.0005
-    weight_decay: 0.001
+    lr: 0.0001
+    weight_decay: 0.01
     warmup_epochs: 5
   manual_seed: 1265
   metrics: ["lpips", "ssim", "psnr", "fid"]
@@ -72,7 +74,7 @@ experiment_params:
 
 trainer_params:
   devices: 1
-  strategy: "ddp"
+  strategy: "auto"
   precision: "32-true"
   max_epochs: 100
 

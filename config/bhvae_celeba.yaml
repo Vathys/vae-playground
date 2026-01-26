@@ -31,7 +31,7 @@ model_params:
     weight_norm: False
     norm: "layer"
     activation: "silu"
-    final_activation: "sigmoid"
+    final_activation: "tanh"
 
 data_params:
   dataset: "celeba"

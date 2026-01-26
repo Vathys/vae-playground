@@ -176,14 +176,14 @@ class VAEDataset(L.LightningDataModule):
             [
                 T.ToImage(),
                 T.ToDtype(torch.float32, scale=True),
-                T.Normalize(mean=[0, 0, 0], std=[1, 1, 1]),
+                T.Normalize(mean=[0.5] * 3, std=[0.5] * 3),
             ]
         )
         raw_val.extend(
             [
                 T.ToImage(),
                 T.ToDtype(torch.float32, scale=True),
-                T.Normalize(mean=[0, 0, 0], std=[1, 1, 1]),
+                T.Normalize(mean=[0.5] * 3, std=[0.5] * 3),
             ]
         )
 
